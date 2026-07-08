@@ -1,20 +1,27 @@
 //! hookstr_cli — dev-machine half of hookstr. Pull-only:
 //!
 //! connect -> NIP-42 AUTH -> sync down whatever we're missing -> replay each
-//! stored delivery against its configured target, oldest first.
+//! stored delivery against its configured target, oldest first. With
+//! `--follow`, stay connected and replay new webhooks in realtime as they
+//! arrive, reconnecting (with backoff) when the connection drops.
+//!
+//! Trust boundary: the relay connection only feeds nostrdb's ingester, which
+//! verifies before committing. Everything we act on — including the realtime
+//! notifications in follow mode — is read back out of the local nostrdb, so
+//! replay never trusts a wire frame.
 //!
 //! Milestone 1 syncs with a dumb `until`-paginated REQ; negentropy reconcile
-//! plus a live-tail subscription replace it in milestone 2 (see ../../SPIKE.md).
+//! replaces the catch-up in milestone 2 (see ../../SPIKE.md).
 //!
 //! Replay is at-least-once by design: the consumer dedupes on the provider's
 //! delivery-id header, so crash-mid-replay is always safe.
 
 use clap::{Parser, Subcommand};
+use futures_util::StreamExt;
 use hookstr_core::WebhookRecord;
-use nostrdb::{Config, Filter, Ndb, Transaction};
+use nostrdb::{Config, Filter, Ndb, SubscriptionStream, Transaction};
 use serde_json::json;
-use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod config;
 mod replay_state;
@@ -27,6 +34,8 @@ const PAGE: usize = 500;
 /// Cap on the local replay query. Far above any realistic backlog; if it is
 /// ever hit, the next run picks up the rest.
 const MAX_LOCAL_QUERY: i32 = 1_000_000;
+/// How long `--follow` waits before redialing a dropped connection.
+const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Parser)]
 #[command(about = "hookstr drain: sync stored webhooks and replay them locally")]
@@ -37,12 +46,17 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Sync webhooks down from the relay and replay them against the
-    /// configured targets.
+    /// Sync webhooks down from the relay, replay whatever is missing, then
+    /// keep following: new webhooks replay in realtime as they arrive, and a
+    /// dropped connection redials. Pass --once for a single catch-up pass
+    /// (cron-style) instead.
     Drain {
         /// Path to the TOML config file.
         #[arg(long, default_value = "hookstr_cli.toml")]
         config: String,
+        /// Exit after catch-up + replay instead of following.
+        #[arg(long)]
+        once: bool,
     },
     /// Generate a keypair (for either side; the drain's pubkey goes in
     /// hookstrd's allowlist).
@@ -53,108 +67,237 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     match Args::parse().command {
-        Command::Drain { config } => drain(DrainConfig::load(&config)?).await,
+        Command::Drain { config, once } => drain(DrainConfig::load(&config)?, !once).await,
         Command::Keygen => keygen(),
     }
 }
 
 fn keygen() -> anyhow::Result<()> {
-    let keypair = enostr::FullKeypair::generate();
+    let secp = secp256k1::Secp256k1::new();
+    let (seckey, pubkey) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
     let nsec = bech32::encode::<bech32::Bech32>(
         bech32::Hrp::parse_unchecked("nsec"),
-        &keypair.secret_key.to_secret_bytes(),
+        &seckey.secret_bytes(),
     )?;
     println!("nsec:   {nsec}");
-    println!("pubkey: {}", keypair.pubkey.hex());
+    println!("pubkey: {}", hex::encode(pubkey.x_only_public_key().0.serialize()));
     Ok(())
 }
 
-async fn drain(cfg: DrainConfig) -> anyhow::Result<()> {
+async fn drain(cfg: DrainConfig, follow: bool) -> anyhow::Result<()> {
     let seckey = cfg.seckey()?;
     let state = ReplayState::open(&cfg.redb_path)?;
     std::fs::create_dir_all(&cfg.db_path)?;
     let ndb = Ndb::new(&cfg.db_path, &Config::new())?;
+    let http = reqwest::Client::new();
 
+    loop {
+        match connect_and_drain(&cfg, &seckey, &state, &ndb, &http, follow).await {
+            // One-shot ran to completion. (Follow mode only returns Err.)
+            Ok(()) => return Ok(()),
+            // An auth refusal is permanent (wrong key / not on the
+            // allowlist) — reconnecting would just spin.
+            Err(err) if follow && !format!("{err:#}").contains("refused auth") => {
+                tracing::warn!("connection lost: {err:#}; reconnecting in {RECONNECT_DELAY:?}");
+                tokio::time::sleep(RECONNECT_DELAY).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// One connection's worth of work: catch up, replay the backlog, and (in
+/// follow mode) hold the standing subscription until the connection dies.
+async fn connect_and_drain(
+    cfg: &DrainConfig,
+    seckey: &[u8; 32],
+    state: &ReplayState,
+    ndb: &Ndb,
+    http: &reqwest::Client,
+    follow: bool,
+) -> anyhow::Result<()> {
     let mut relay = relay_sync::Relay::connect(&cfg.relay_url)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     relay
-        .authenticate(&seckey)
+        .authenticate(seckey)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    // Milestone-1 dumb drain: page backwards with `until` past the relay's
-    // stored-replay cap. Pages overlap on the boundary timestamp so nothing
-    // is skipped — ndb dedupes re-ingests, and `seen` detects the page that
-    // brings nothing new (the loop's only exit).
-    let mut seen: HashSet<[u8; 32]> = HashSet::new();
-    let mut until = now_s() + 600;
-    loop {
-        let filter = json!({
-            "kinds": [hookstr_core::KIND_WEBHOOK],
-            "until": until,
-            "limit": PAGE,
-        });
-        let received = relay
-            .sync_into(&ndb, &filter.to_string())
+    catch_up(&mut relay, ndb).await?;
+
+    // Follow plumbing goes up *before* the backlog replay so no arrival can
+    // fall between the two. Notifications come off the local nostrdb
+    // subscription — it fires only for verified, committed notes; the
+    // standing REQ merely feeds the ingester. Its stored phase re-sends
+    // recent events, which both plugs the gap since the last catch-up page
+    // and is harmlessly deduped by ndb otherwise.
+    let mut incoming = if follow {
+        let sub = {
+            let filter = Filter::new()
+                .kinds([hookstr_core::KIND_WEBHOOK as u64])
+                .build();
+            ndb.subscribe(&[filter])?
+        };
+        let stream = SubscriptionStream::new(ndb.clone(), sub).notes_per_await(1);
+
+        let filter = json!({ "kinds": [hookstr_core::KIND_WEBHOOK] });
+        relay
+            .stream_into(ndb, &filter.to_string())
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let fresh = received.iter().filter(|id| seen.insert(**id)).count();
-        if fresh == 0 {
-            break;
-        }
-        relay_sync::await_ingest(&ndb, &received).await;
-        until = oldest_created_at(&ndb, &received).unwrap_or(0);
-        tracing::info!("synced {fresh} new webhook event(s)");
-    }
+        Some(stream)
+    } else {
+        None
+    };
 
-    // Everything stored locally, oldest first. Collected owned so the
-    // non-Send Transaction is gone before the replay awaits below.
-    let mut deliveries = {
-        let txn = Transaction::new(&ndb)?;
+    replay_backlog(cfg, state, ndb, http).await?;
+
+    let Some(incoming) = incoming.as_mut() else {
+        return Ok(());
+    };
+    tracing::info!("following: replaying new webhooks as they arrive");
+    loop {
+        tokio::select! {
+            pumped = relay.pump_one(ndb) => {
+                pumped.map_err(|e| anyhow::anyhow!("{e}"))?;
+            }
+            keys = incoming.next() => {
+                let Some(keys) = keys else {
+                    anyhow::bail!("local subscription ended");
+                };
+                // Resolve keys to ids in a scoped (non-Send) txn, then replay.
+                let ids: Vec<[u8; 32]> = {
+                    let txn = Transaction::new(ndb)?;
+                    keys.iter()
+                        .filter_map(|key| ndb.get_note_by_key(&txn, *key).ok().map(|note| *note.id()))
+                        .collect()
+                };
+                for id in ids {
+                    replay_event(cfg, state, ndb, http, &id).await?;
+                }
+            }
+        }
+    }
+}
+
+/// Pull whatever the relay has that we don't: negentropy reconcile —
+/// O(difference) on the wire — then fetch the missing events by id.
+/// Pull-only: `Diff::have` is ignored (hookstrd's db is the source of truth;
+/// nothing pushes into it from here).
+async fn catch_up(relay: &mut relay_sync::Relay, ndb: &Ndb) -> anyhow::Result<()> {
+    let wire = json!({ "kinds": [hookstr_core::KIND_WEBHOOK] });
+    let storage = {
+        let filter = Filter::new()
+            .kinds([hookstr_core::KIND_WEBHOOK as u64])
+            .build();
+        relay_sync::local_set(ndb, &filter).map_err(|e| anyhow::anyhow!("{e}"))?
+    };
+
+    let diff = relay
+        .reconcile(&wire.to_string(), storage)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Fetch missing events by id, chunked under the relay's per-REQ
+    // stored-replay cap.
+    for chunk in diff.need.chunks(PAGE) {
+        let ids: Vec<String> = chunk.iter().map(hex::encode).collect();
+        let received = relay
+            .sync_into(ndb, &json!({ "ids": ids }).to_string())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        relay_sync::await_ingest(ndb, &received).await;
+    }
+    if !diff.need.is_empty() {
+        tracing::info!("reconciled {} missing webhook event(s)", diff.need.len());
+    }
+    Ok(())
+}
+
+/// Replay everything stored locally that is due, oldest first.
+async fn replay_backlog(
+    cfg: &DrainConfig,
+    state: &ReplayState,
+    ndb: &Ndb,
+    http: &reqwest::Client,
+) -> anyhow::Result<()> {
+    // Collected owned so the non-Send Transaction is gone before the awaits.
+    let mut backlog = {
+        let txn = Transaction::new(ndb)?;
         let filter = Filter::new()
             .kinds([hookstr_core::KIND_WEBHOOK as u64])
             .build();
         ndb.query(&txn, &[filter], MAX_LOCAL_QUERY)?
             .into_iter()
-            .filter_map(|result| {
-                let rec = hookstr_core::parse_webhook_note(&result.note).ok()?;
-                Some((*result.note.id(), rec))
-            })
+            .map(|result| (*result.note.id(), result.note.created_at()))
             .collect::<Vec<_>>()
     };
-    deliveries.sort_by_key(|(_, rec)| rec.received_at_ms);
+    backlog.sort_by_key(|(_, created_at)| *created_at);
 
-    let http = reqwest::Client::new();
-    let (mut replayed, mut failed, mut unmapped) = (0usize, 0usize, 0usize);
-    for (id, rec) in &deliveries {
-        if !state.is_due(id, now_s())? {
-            continue;
-        }
-        let Some(target) = cfg.target_for(&rec.path) else {
-            // Unroutable provider path: leave unreplayed so a later config
-            // change picks it up.
-            unmapped += 1;
-            continue;
-        };
-        match replay(&http, &target, rec).await {
-            Ok(()) => {
-                state.mark_replayed(id)?;
-                replayed += 1;
-                tracing::info!(path = rec.path, id = hex::encode(id), "replayed");
-            }
-            Err(err) => {
-                state.mark_failed(id, now_s())?;
-                failed += 1;
-                tracing::warn!(path = rec.path, id = hex::encode(id), "replay failed: {err:#}");
-            }
+    let (mut replayed, mut failed, mut unrouted) = (0usize, 0usize, 0usize);
+    for (id, _) in &backlog {
+        match replay_event(cfg, state, ndb, http, id).await? {
+            Outcome::Replayed => replayed += 1,
+            Outcome::Failed => failed += 1,
+            Outcome::NoTarget => unrouted += 1,
+            Outcome::NotDue => {}
         }
     }
     tracing::info!(
-        "drain complete: {replayed} replayed, {failed} failed, {unmapped} with no target ({} stored total)",
-        deliveries.len()
+        "drain complete: {replayed} replayed, {failed} failed, {unrouted} with no target ({} stored total)",
+        backlog.len()
     );
     Ok(())
+}
+
+enum Outcome {
+    Replayed,
+    Failed,
+    NoTarget,
+    /// Already replayed, in backoff, or not (yet) in the local db.
+    NotDue,
+}
+
+/// Replay one stored delivery if it's due: load it from the local db (the
+/// only trusted source), route it, POST it, record the outcome.
+async fn replay_event(
+    cfg: &DrainConfig,
+    state: &ReplayState,
+    ndb: &Ndb,
+    http: &reqwest::Client,
+    id: &[u8; 32],
+) -> anyhow::Result<Outcome> {
+    if !state.is_due(id, now_s())? {
+        return Ok(Outcome::NotDue);
+    }
+    let rec = {
+        let txn = Transaction::new(ndb)?;
+        ndb.get_note_by_id(&txn, id)
+            .ok()
+            .and_then(|note| hookstr_core::parse_webhook_note(&note).ok())
+    };
+    let Some(rec) = rec else {
+        return Ok(Outcome::NotDue);
+    };
+    let Some(target) = cfg.target_for(&rec.path) else {
+        // Unroutable provider path: leave unreplayed so a later config
+        // change picks it up.
+        return Ok(Outcome::NoTarget);
+    };
+
+    match replay(http, &target, &rec).await {
+        Ok(()) => {
+            state.mark_replayed(id)?;
+            tracing::info!(path = rec.path, id = hex::encode(id), "replayed");
+            Ok(Outcome::Replayed)
+        }
+        Err(err) => {
+            state.mark_failed(id, now_s())?;
+            tracing::warn!(path = rec.path, id = hex::encode(id), "replay failed: {err:#}");
+            Ok(Outcome::Failed)
+        }
+    }
 }
 
 /// POST the delivery to its target: byte-exact body, preserved headers. Any
@@ -167,15 +310,6 @@ async fn replay(http: &reqwest::Client, target: &str, rec: &WebhookRecord) -> an
     let resp = req.body(rec.body.clone()).send().await?;
     anyhow::ensure!(resp.status().is_success(), "target answered {}", resp.status());
     Ok(())
-}
-
-/// Smallest created_at among `ids`, read back from the local db (`sync_into`
-/// returns only ids). The non-Send Transaction stays scoped here.
-fn oldest_created_at(ndb: &Ndb, ids: &[[u8; 32]]) -> Option<u64> {
-    let txn = Transaction::new(ndb).ok()?;
-    ids.iter()
-        .filter_map(|id| ndb.get_note_by_id(&txn, id).ok().map(|note| note.created_at()))
-        .min()
 }
 
 fn now_s() -> u64 {

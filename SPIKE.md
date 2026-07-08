@@ -126,33 +126,37 @@ Two things it needs that it doesn't have:
 
 ## hookstr_cli
 
-Builds on `notedeck/crates/relay_sync` (verified API; already used for
-headway-issue sync between headway_cli and the notedeck GUI):
+Builds on `notedeck/crates/relay_sync` (already used for headway-issue sync
+between headway_cli and the notedeck GUI):
 
-- `Relay::connect`, `Relay::reconcile(filter_json, NegentropyStorageVector)
-  -> Diff{need, have}` — NIP-77 initiator.
+- `Relay::connect`, `Relay::authenticate(seckey)` — NIP-42 client half.
+- `Relay::reconcile(filter_json, NegentropyStorageVector) -> Diff{need,
+  have}` — NIP-77 initiator; `local_set(ndb, filter)` builds the local side.
 - `sync_into(ndb, filter_json)` — one-shot REQ→ingest until EOSE.
-- `publish(frames)` — OK-awaited, tolerates `duplicate:`/`replaced:`.
+- `stream_into(ndb, filter_json)` — the same without the trailing CLOSE:
+  the subscription stays open and `pump_one(ndb)` feeds each subsequent
+  frame to the ingester.
 - `reconcile_sync` — bidirectional (chunks of 300); **do not use**: the
   drain is pull-only. hookstrd's DB is the source of truth and nothing
   should push into it from the consumer side.
 - `open_ndb`, `await_ingest`, nsec helpers (`login`/`stored_nsec`/`parse_nsec`).
 
-Drain loop: connect → AUTH → `reconcile` with `{"kinds":[3003]}` (optionally
-`since`-bounded as pure optimization) → fetch `Diff::need` into the local
-nostrdb → standing REQ for live-tail → for each new-to-us event, replay.
+Default drain behavior (`hookstr_cli drain`): connect → AUTH → negentropy
+reconcile with `{"kinds":[3003]}` → fetch `Diff::need` into the local
+nostrdb → replay the due backlog oldest-first → **follow**: hold a standing
+REQ and replay each new webhook as it arrives, redialing (with backoff) when
+the connection drops. `--once` exits after the backlog replay instead
+(cron-style).
 
-Gaps to close in relay_sync (upstream, it's ours):
+**Trust boundary.** The relay connection only feeds nostrdb's ingester,
+which verifies before committing. Realtime notifications come off a *local*
+`ndb.subscribe(kinds=[3003])` stream — it fires only for verified, committed
+notes — never off ids claimed in wire frames. (Same pattern as hookstrd's
+durable-then-204, from the other side.)
 
-- **Client-side live-tail**: `sync_into` closes at EOSE, but the server
-  already streams post-EOSE events — add a `Relay::stream` (or callback
-  variant) that keeps consuming EVENT frames after EOSE. Until then, a
-  local loop in hookstr_cli re-implementing the read side is ~30 lines.
-- **wss TLS**: notedeck pins `tokio-tungstenite = "0.24"` featureless.
-  Fixed by feature unification — hookstr declares the same version with
-  `rustls-tls-native-roots` (already in the workspace manifest).
-- **NIP-42 client half**: send AUTH on challenge, signed with the client
-  key.
+wss TLS note: notedeck pins `tokio-tungstenite = "0.24"` featureless; hookstr
+declares the same version with `rustls-tls-native-roots`, and feature
+unification gives relay_sync's `connect_async` wss support.
 
 **Replay.** Reconstruct with `parse_webhook_note`, then POST with the
 preserved headers and byte-exact body. Deliveries are self-describing: the
@@ -221,9 +225,11 @@ TLS is the proxy's problem. hookstrd listens plaintext on localhost only.
    an end-to-end smoke test: curl → 204 → authed drain → byte-exact replay
    (headers preserved), redb dedupe across runs, allowlist refusal for a
    wrong key.
-2. **Negentropy + live-tail.** `Relay::reconcile` pull-only catch-up;
-   `Relay::stream` (or local loop) for realtime post-EOSE events. Latency
-   while connected: a few seconds.
+2. **Negentropy + live-tail.** — **DONE (2026-07-08).** `Relay::reconcile`
+   pull-only catch-up is the default (no paginated fallback — the relay is
+   assumed to speak NIP-77); follow mode via `stream_into` + `pump_one`,
+   with new-event notifications taken from the local nostrdb subscription.
+   Smoke-tested: a delivery made while following replays in under a second.
 3. **Polish.** Optional edge signature verification per provider; metrics /
    `nak`-style inspection recipes; systemd unit + deploy notes.
 
@@ -243,8 +249,9 @@ TLS is the proxy's problem. hookstrd listens plaintext on localhost only.
 - rustls flavor: aws-lc-rs vs ring — whatever notedeck converges on.
 - nostrdb max note size vs pathological webhook bodies — find the limit,
   decide truncate-vs-reject (and whether providers that big exist).
-- upstream `Relay::stream` into relay_sync vs keeping the live-tail loop in
-  hookstr_cli permanently.
+- relay_sync still depends on notedeck's `enostr` internally (`parse_nsec`,
+  `ClientMessage`); hookstr no longer does. Worth trimming upstream if the
+  relay crates are ever extracted to a standalone repo.
 - LMDB mapsize default for a store-everything DB.
 
 ## Appendix: first deployment (commerce / Modern Treasury)
