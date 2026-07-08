@@ -46,7 +46,7 @@ impl DrainConfig {
     pub fn seckey(&self) -> anyhow::Result<[u8; 32]> {
         let nsec = std::fs::read_to_string(&self.nsec_path)
             .with_context(|| format!("reading nsec from {}", self.nsec_path))?;
-        let (seckey, _pubkey) = relay_sync::parse_nsec(nsec.trim())
+        let (seckey, _pubkey) = nostr_relay_sync::parse_nsec(nsec.trim())
             .map_err(|e| anyhow::anyhow!("{}: {e}", self.nsec_path))?;
         Ok(seckey)
     }

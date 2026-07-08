@@ -6,11 +6,11 @@ edition.workspace = true
 [dependencies]
 hookstr-core.workspace = true
 nostrdb.workspace = true
-relay_sync.workspace = true
+nostr_relay_sync.workspace = true
 secp256k1.workspace = true
 tokio.workspace = true
-# Same version as notedeck's featureless pin; declaring the TLS feature here
-# is what gives relay_sync's connect_async wss:// support via feature
+# Same version as nostr_relay_sync's featureless pin; declaring the TLS
+# feature here is what gives its connect_async wss:// support via feature
 # unification. See SPIKE.md "Gap: wss".
 tokio-tungstenite.workspace = true
 futures-util.workspace = true

@@ -13,16 +13,14 @@ edition = "2024"
 [workspace.dependencies]
 hookstr-core = { path = "crates/hookstr-core" }
 
-# MUST match the notedeck workspace pin exactly (notedeck/Cargo.toml:82) so
-# types unify with the path-dep'd nostrdb_relay / relay_sync crates below.
+# MUST match the pin in nostrdb-relay / nostr-relay-sync (same URL + rev) so
+# types unify. That pin is kernelkind's fork because notedeck rides it: the
+# rev carries SendFilter + other commits not yet on damus-io master.
 nostrdb = { git = "https://github.com/kernelkind/nostrdb-rs", rev = "aca2f66e3579dee0c9245e4c66100dd12cd940d6" }
 
-# Path deps into the notedeck workspace. Cargo resolves their
-# `workspace = true` fields against *notedeck's* root manifest, so this works
-# from outside that workspace (same mechanism as git-depping a workspace
-# member). Swap for git deps on damus-io/notedeck once these land upstream.
-nostrdb_relay = { path = "../notedeck/crates/nostrdb_relay" }
-relay_sync = { path = "../notedeck/crates/relay_sync" }
+# Extracted from notedeck as standalone repos so hookstr builds anywhere.
+nostrdb_relay = { git = "https://github.com/jb55/nostrdb-relay", rev = "28f9d854eb6abe48c79fcf2374d0dbcb8cd3abc5" }
+nostr_relay_sync = { git = "https://github.com/jb55/nostr-relay-sync", rev = "1e0c5232e885e5d010542fcdd1fe3426d5f893d5" }
 
 # Keygen only. Same version nostr/notedeck pin so one copy builds.
 secp256k1 = { version = "0.30", features = ["rand", "std"] }
@@ -42,7 +40,7 @@ toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.22.1"
 hex = "0.4.3"
-bech32 = { version = "0.11", default-features = false }
+bech32 = { version = "0.11", default-features = false, features = ["alloc"] }
 anyhow = "1"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

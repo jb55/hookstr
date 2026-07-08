@@ -99,13 +99,14 @@ durability, then 204**. nostrdb ingest is queued to background writer
 threads, so responding 204 at queue time could lose a delivery on crash.
 Solved with nostrdb's own subscriptions: subscribe on an ids filter for the
 note before ingesting, and nostrdb notifies the subscription when ingest
-completes — await that, then 204. (No polling; relay_sync's `await_ingest`
+completes — await that, then 204. (No polling; nostr_relay_sync's `await_ingest`
 is the poll-based fallback if ever needed.) Persistence failure → 500 so
 the provider retries. Never block on anything downstream of nostrdb.
 
 **Relay (ws).** The server side already exists:
-`notedeck/crates/nostrdb_relay` (~450 lines) is a complete embeddable
-minimal relay — `spawn(ndb, addr) -> RelayHandle` speaking
+[`nostrdb_relay`](https://github.com/jb55/nostrdb-relay) (~450 lines,
+extracted from notedeck 2026-07-08 so hookstr builds on any machine) is a
+complete embeddable minimal relay — `spawn(ndb, addr) -> RelayHandle` speaking
 EVENT / REQ (stored replay **plus live phase** via `SubscriptionStream`) /
 CLOSE, and a NIP-77 responder (NEG-OPEN/NEG-MSG/NEG-CLOSE). hookstrd embeds
 it next to the axum listener. No relay reimplementation.
@@ -126,8 +127,11 @@ Two things it needs that it doesn't have:
 
 ## hookstr_cli
 
-Builds on `notedeck/crates/relay_sync` (already used for headway-issue sync
-between headway_cli and the notedeck GUI):
+Builds on [`nostr_relay_sync`](https://github.com/jb55/nostr-relay-sync)
+(extracted 2026-07-08 from notedeck's `relay_sync`, which is also used for
+headway-issue sync between headway_cli and the notedeck GUI; the standalone
+copy drops the `enostr` dep — pubkeys are `[u8; 32]`, `parse_nsec` derives
+via secp256k1):
 
 - `Relay::connect`, `Relay::authenticate(seckey)` — NIP-42 client half.
 - `Relay::reconcile(filter_json, NegentropyStorageVector) -> Diff{need,
@@ -154,9 +158,9 @@ which verifies before committing. Realtime notifications come off a *local*
 notes — never off ids claimed in wire frames. (Same pattern as hookstrd's
 durable-then-204, from the other side.)
 
-wss TLS note: notedeck pins `tokio-tungstenite = "0.24"` featureless; hookstr
-declares the same version with `rustls-tls-native-roots`, and feature
-unification gives relay_sync's `connect_async` wss support.
+wss TLS note: nostr_relay_sync pins `tokio-tungstenite = "0.24"` featureless;
+hookstr declares the same version with `rustls-tls-native-roots`, and feature
+unification gives its `connect_async` wss support.
 
 **Replay.** Reconstruct with `parse_webhook_note`, then POST with the
 preserved headers and byte-exact body. Deliveries are self-describing: the
@@ -249,9 +253,12 @@ TLS is the proxy's problem. hookstrd listens plaintext on localhost only.
 - rustls flavor: aws-lc-rs vs ring — whatever notedeck converges on.
 - nostrdb max note size vs pathological webhook bodies — find the limit,
   decide truncate-vs-reject (and whether providers that big exist).
-- relay_sync still depends on notedeck's `enostr` internally (`parse_nsec`,
-  `ClientMessage`); hookstr no longer does. Worth trimming upstream if the
-  relay crates are ever extracted to a standalone repo.
+- ~~relay_sync still depends on notedeck's `enostr` internally~~ — resolved
+  by the 2026-07-08 extraction: `nostr_relay_sync` has no enostr dep. The
+  in-tree notedeck `relay_sync` (and its NIP-42 additions) still exists;
+  whether notedeck switches to the standalone crates is a notedeck decision.
+  Repo/crate naming may still change (`nostrdb_relay_sync`?) before any
+  crates.io publish.
 - LMDB mapsize default for a store-everything DB.
 
 ## Appendix: first deployment (commerce / Modern Treasury)

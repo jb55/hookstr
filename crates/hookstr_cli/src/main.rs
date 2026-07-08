@@ -116,7 +116,7 @@ async fn connect_and_drain(
     http: &reqwest::Client,
     follow: bool,
 ) -> anyhow::Result<()> {
-    let mut relay = relay_sync::Relay::connect(&cfg.relay_url)
+    let mut relay = nostr_relay_sync::Relay::connect(&cfg.relay_url)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     relay
@@ -185,13 +185,13 @@ async fn connect_and_drain(
 /// O(difference) on the wire — then fetch the missing events by id.
 /// Pull-only: `Diff::have` is ignored (hookstrd's db is the source of truth;
 /// nothing pushes into it from here).
-async fn catch_up(relay: &mut relay_sync::Relay, ndb: &Ndb) -> anyhow::Result<()> {
+async fn catch_up(relay: &mut nostr_relay_sync::Relay, ndb: &Ndb) -> anyhow::Result<()> {
     let wire = json!({ "kinds": [hookstr_core::KIND_WEBHOOK] });
     let storage = {
         let filter = Filter::new()
             .kinds([hookstr_core::KIND_WEBHOOK as u64])
             .build();
-        relay_sync::local_set(ndb, &filter).map_err(|e| anyhow::anyhow!("{e}"))?
+        nostr_relay_sync::local_set(ndb, &filter).map_err(|e| anyhow::anyhow!("{e}"))?
     };
 
     let diff = relay
@@ -207,7 +207,7 @@ async fn catch_up(relay: &mut relay_sync::Relay, ndb: &Ndb) -> anyhow::Result<()
             .sync_into(ndb, &json!({ "ids": ids }).to_string())
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        relay_sync::await_ingest(ndb, &received).await;
+        nostr_relay_sync::await_ingest(ndb, &received).await;
     }
     if !diff.need.is_empty() {
         tracing::info!("reconciled {} missing webhook event(s)", diff.need.len());
