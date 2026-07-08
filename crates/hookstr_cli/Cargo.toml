@@ -1,0 +1,26 @@
+[package]
+name = "hookstr_cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hookstr-core.workspace = true
+nostrdb.workspace = true
+relay_sync.workspace = true
+enostr.workspace = true
+tokio.workspace = true
+# Same version as notedeck's featureless pin; declaring the TLS feature here
+# is what gives relay_sync's connect_async wss:// support via feature
+# unification. See SPIKE.md "Gap: wss".
+tokio-tungstenite.workspace = true
+reqwest.workspace = true
+redb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+clap.workspace = true
+hex.workspace = true
+bech32.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

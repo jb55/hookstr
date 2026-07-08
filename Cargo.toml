@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hookstr-core",
+    "crates/hookstrd",
+    "crates/hookstr_cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+hookstr-core = { path = "crates/hookstr-core" }
+
+# MUST match the notedeck workspace pin exactly (notedeck/Cargo.toml:82) so
+# types unify with the path-dep'd nostrdb_relay / relay_sync crates below.
+nostrdb = { git = "https://github.com/kernelkind/nostrdb-rs", rev = "aca2f66e3579dee0c9245e4c66100dd12cd940d6" }
+
+# Path deps into the notedeck workspace. Cargo resolves their
+# `workspace = true` fields against *notedeck's* root manifest, so this works
+# from outside that workspace (same mechanism as git-depping a workspace
+# member). Swap for git deps on damus-io/notedeck once these land upstream.
+nostrdb_relay = { path = "../notedeck/crates/nostrdb_relay" }
+relay_sync = { path = "../notedeck/crates/relay_sync" }
+enostr = { path = "../notedeck/crates/enostr" }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "net", "sync"] }
+axum = { version = "0.8", features = ["macros"] }
+# Version must stay in lockstep with notedeck's pin (0.24) so feature
+# unification gives relay_sync's connect_async TLS support for wss:// —
+# see SPIKE.md "Gap: wss".
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+redb = "2"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22.1"
+hex = "0.4.3"
+bech32 = { version = "0.11", default-features = false }
+anyhow = "1"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

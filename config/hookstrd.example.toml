@@ -1,0 +1,11 @@
+# hookstrd runs on the always-online box behind Caddy (see SPIKE.md § Reverse proxy).
+db_path = "/var/lib/hookstr/ndb"
+mapsize = 34359738368 # 32 GiB; store-everything, so be generous
+ingest_addr = "127.0.0.1:8080"
+relay_addr = "127.0.0.1:8081"
+# Long random secret; this exact string goes in the URL registered with each
+# provider: https://hooks.example.com/ingest/<token>/acme/events
+ingest_token = "CHANGE-ME-long-random-string"
+nsec_path = "/var/lib/hookstr/server.nsec"
+# NIP-42 allowlist: the drain client's pubkey (hex)
+drain_pubkey = "CHANGE-ME"
