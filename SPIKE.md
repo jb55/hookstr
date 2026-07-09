@@ -234,6 +234,15 @@ TLS is the proxy's problem. hookstrd listens plaintext on localhost only.
    assumed to speak NIP-77); follow mode via `stream_into` + `pump_one`,
    with new-event notifications taken from the local nostrdb subscription.
    Smoke-tested: a delivery made while following replays in under a second.
+
+   Both milestones are also covered by cargo e2e tests (2026-07-09):
+   `crates/hookstr_cli/tests/e2e.rs` runs the real hookstrd router + relay
+   in-process and drives the real drain binary (byte-exact replay incl. a
+   binary/base64 body, redb dedupe, realtime follow, allowlist refusal) —
+   hookstrd was split into lib + thin main for this. The client protocol
+   itself (auth, reconcile diff, sync, stream/pump trust boundary) is
+   covered in nostr-relay-sync's own `tests/e2e.rs` against a spawned
+   nostrdb_relay. `cargo test --workspace` needs no running services.
 3. **Polish.** Optional edge signature verification per provider; metrics /
    `nak`-style inspection recipes; systemd unit + deploy notes.
 

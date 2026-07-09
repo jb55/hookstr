@@ -25,3 +25,13 @@ bech32.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# The e2e test runs the real hookstrd ingest router + relay in-process and
+# drives this crate's binary against them.
+hookstrd = { path = "../hookstrd" }
+nostrdb_relay.workspace = true
+axum.workspace = true
+tempfile = "3"
+# The e2e drives the drain binary as a child process.
+tokio = { workspace = true, features = ["process"] }

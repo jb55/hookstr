@@ -631,6 +631,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastrand"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
+
+[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -908,18 +914,22 @@ name = "hookstr_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "bech32",
  "clap",
  "futures-util",
  "hex",
  "hookstr-core",
+ "hookstrd",
  "nostr_relay_sync",
  "nostrdb",
+ "nostrdb_relay",
  "redb",
  "reqwest",
  "secp256k1 0.30.0",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "toml",
@@ -1460,7 +1470,7 @@ dependencies = [
 [[package]]
 name = "nostr_relay_sync"
 version = "0.1.0"
-source = "git+https://github.com/jb55/nostr-relay-sync?rev=1e0c5232e885e5d010542fcdd1fe3426d5f893d5#1e0c5232e885e5d010542fcdd1fe3426d5f893d5"
+source = "git+https://github.com/jb55/nostr-relay-sync?rev=f61f2952948fb4d2bfdb3fd8375b95eac1c11f3e#f61f2952948fb4d2bfdb3fd8375b95eac1c11f3e"
 dependencies = [
  "bech32",
  "dirs",
@@ -2314,6 +2324,19 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.3",
+ "once_cell",
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
