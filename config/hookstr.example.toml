@@ -1,15 +1,12 @@
-# hookstr_cli drain config: sync stored webhooks from hookstrd and replay
-# them against local consumers. Paths are used verbatim (no ~ expansion);
-# relative paths resolve against the cwd you run the drain from.
+# hookstr drain config: sync stored webhooks from hookstrd and replay them
+# against local consumers. Lives at ~/.config/hookstr/config.toml (or
+# $XDG_CONFIG_HOME/hookstr/config.toml); pass --config to point elsewhere.
+# Paths are used verbatim (no ~ expansion); relative paths resolve against
+# the cwd you run the drain from.
 relay_url = "wss://hooks.example.com"
 db_path = "/var/lib/hookstr-cli/ndb"
 redb_path = "/var/lib/hookstr-cli/replays.redb"
 nsec_path = "/var/lib/hookstr-cli/drain.nsec"
-
-# Providers this drain pulls, matched on each event's indexed `t` tag (the
-# {provider} ingest-path segment). Run one drain per consumer, each scoped to
-# what it handles. Omit or leave empty to pull every provider.
-providers = ["acme"]
 
 # Deliveries are self-describing: the event's path tag mirrors everything
 # after the token in the ingest URL, so everything replays to

@@ -122,14 +122,11 @@ replay.
 
 Generate the drain keypair (`hookstr keygen` again — its pubkey is
 what goes in `drain_pubkey` above), write the nsec to a file, and
-configure `hookstr_cli.toml` (see
-[config/hookstr_cli.example.toml](config/hookstr_cli.example.toml)):
+configure `~/.config/hookstr/config.toml` (or pass `--config`; see
+[config/hookstr.example.toml](config/hookstr.example.toml)):
 
 ```toml
 relay_url = "wss://hooks.example.com"
-# Optionally scope this drain to specific providers (empty/omitted = all);
-# run one drain per consumer, each scoped to what it handles.
-#providers = ["acme"]
 db_path = "/var/lib/hookstr-cli/ndb"
 redb_path = "/var/lib/hookstr-cli/replays.redb"
 nsec_path = "/var/lib/hookstr-cli/drain.nsec"
@@ -148,13 +145,15 @@ target_base = "http://localhost:3000/webhooks"
 Then drain:
 
 ```
-$ hookstr drain --config hookstr.toml
+$ hookstr drain
 ```
 
 This connects, AUTHs, negentropy-syncs the missed backlog, replays it
 oldest-first, and then follows — each new webhook replays in under a
 second while the connection is up. Pass `--once` to exit after the
-catch-up replay instead (cron-style).
+catch-up replay instead (cron-style). Positional args scope the drain
+to specific providers (`hookstr drain acme stripe`; empty = all) — run
+one drain per consumer, each scoped to what it handles.
 
 Replay state (attempt counts, backoff) is client-local in redb, keyed by
 event id — a replay target being down (consumer not running) just means

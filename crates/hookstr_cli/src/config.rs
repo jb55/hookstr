@@ -9,10 +9,10 @@ pub struct DrainConfig {
     /// wss://hooks.example.com
     pub relay_url: String,
     /// Providers this drain pulls, matched on each event's indexed `t` tag
-    /// (the provider name from hookstrd's `[ingest_tokens]`). Run one drain
-    /// per consumer, each scoped to what it handles. Omit or leave empty to
-    /// pull every provider.
-    #[serde(default)]
+    /// (the provider name from hookstrd's `[ingest_tokens]`). Set from the
+    /// drain's positional args, not the config file; empty pulls every
+    /// provider.
+    #[serde(skip)]
     pub providers: Vec<String>,
     /// Local mirror nostrdb (negentropy needs the full local set).
     pub db_path: String,
@@ -32,10 +32,14 @@ pub struct DrainConfig {
 }
 
 impl DrainConfig {
-    pub fn load(path: &str) -> anyhow::Result<Self> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading config {path}"))?;
-        toml::from_str(&text).with_context(|| format!("parsing {path}"))
+    pub fn load(path: Option<&str>) -> anyhow::Result<Self> {
+        let path = match path {
+            Some(path) => std::path::PathBuf::from(path),
+            None => default_path()?,
+        };
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading config {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
     /// Where a delivery with this `path` tag replays to: an explicit
@@ -56,4 +60,15 @@ impl DrainConfig {
             .map_err(|e| anyhow::anyhow!("{}: {e}", self.nsec_path))?;
         Ok(seckey)
     }
+}
+
+/// `$XDG_CONFIG_HOME/hookstr/config.toml`, with the usual `~/.config`
+/// fallback when XDG_CONFIG_HOME is unset.
+fn default_path() -> anyhow::Result<std::path::PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Ok(std::path::PathBuf::from(xdg).join("hookstr/config.toml"));
+    }
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| anyhow::anyhow!("neither XDG_CONFIG_HOME nor HOME is set; pass --config"))?;
+    Ok(std::path::PathBuf::from(home).join(".config/hookstr/config.toml"))
 }

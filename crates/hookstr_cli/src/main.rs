@@ -62,12 +62,17 @@ enum Command {
     /// dropped connection redials. Pass --once for a single catch-up pass
     /// (cron-style) instead.
     Drain {
-        /// Path to the TOML config file.
-        #[arg(long, default_value = "hookstr_cli.toml")]
-        config: String,
+        /// Path to the TOML config file
+        /// (default: $XDG_CONFIG_HOME/hookstr/config.toml).
+        #[arg(long)]
+        config: Option<String>,
         /// Exit after catch-up + replay instead of following.
         #[arg(long)]
         once: bool,
+        /// Providers to drain, matched on each event's indexed `t` tag (the
+        /// provider names from hookstrd's [ingest_tokens]). Empty = all;
+        /// run one drain per consumer, each scoped to what it handles.
+        providers: Vec<String>,
     },
     /// Generate a keypair (for either side; the drain's pubkey goes in
     /// hookstrd's allowlist).
@@ -78,7 +83,15 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     match Args::parse().command {
-        Command::Drain { config, once } => drain(DrainConfig::load(&config)?, !once).await,
+        Command::Drain {
+            config,
+            once,
+            providers,
+        } => {
+            let mut cfg = DrainConfig::load(config.as_deref())?;
+            cfg.providers = providers;
+            drain(cfg, !once).await
+        }
         Command::Keygen => keygen(),
     }
 }
