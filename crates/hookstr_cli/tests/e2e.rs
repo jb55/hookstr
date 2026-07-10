@@ -45,6 +45,9 @@ struct World {
     ingest_port: u16,
     deliveries: mpsc::UnboundedReceiver<Delivery>,
     cfg_path: std::path::PathBuf,
+    /// The capture target's base URL, as written into the config's
+    /// target_base.
+    target_url: String,
     _relay: nostrdb_relay::RelayHandle,
 }
 
@@ -95,6 +98,7 @@ impl World {
         let nsec_path = tmp.path().join("drain.nsec");
         std::fs::write(&nsec_path, format!("{}\n", nsec(drain_secret))).expect("nsec");
 
+        let target_url = format!("http://127.0.0.1:{target_port}/hook");
         let cfg_path = tmp.path().join("hookstr.toml");
         std::fs::write(
             &cfg_path,
@@ -103,7 +107,7 @@ impl World {
 db_path = "{}"
 redb_path = "{}"
 nsec_path = "{}"
-target_base = "http://127.0.0.1:{target_port}/hook"
+target_base = "{target_url}"
 "#,
                 relay.url(),
                 tmp.path().join("cli-db").display(),
@@ -118,6 +122,7 @@ target_base = "http://127.0.0.1:{target_port}/hook"
             ingest_port,
             deliveries,
             cfg_path,
+            target_url,
             _relay: relay,
         }
     }
@@ -305,6 +310,44 @@ async fn follow_replays_new_webhooks_in_realtime() {
     assert_eq!(headers.get("x-webhook-id").map(String::as_str), Some("wh_2"));
 
     child.kill().await.expect("stop follower");
+}
+
+#[tokio::test]
+async fn drain_target_flag_overrides_config_target_base() {
+    let mut world = World::start(&DRAIN_SECRET).await;
+
+    // Break the config's target_base; only the --target flag can route this
+    // delivery to the capture server.
+    let cfg = std::fs::read_to_string(&world.cfg_path).unwrap();
+    std::fs::write(
+        &world.cfg_path,
+        cfg.replace(&world.target_url, "http://127.0.0.1:1/nowhere"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        world
+            .ingest("acme/events", &[("x-webhook-id", "wh_t")], b"flagged")
+            .await,
+        StatusCode::NO_CONTENT
+    );
+
+    let target = world.target_url.clone();
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        world.drain_cmd().args(["--once", "--target", &target]).output(),
+    )
+    .await
+    .expect("drain finishes within timeout")
+    .expect("drain spawns");
+    assert!(
+        output.status.success(),
+        "drain --target failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let (path, _, body) = world.next_delivery().await;
+    assert_eq!((path.as_str(), body.as_slice()), ("acme/events", &b"flagged"[..]));
 }
 
 #[tokio::test]

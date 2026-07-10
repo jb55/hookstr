@@ -69,6 +69,11 @@ enum Command {
         /// Exit after catch-up + replay instead of following.
         #[arg(long)]
         once: bool,
+        /// Replay target base URL for this run — deliveries POST to
+        /// {target}/{path} — overriding the config's target_base (explicit
+        /// [targets] path overrides still win).
+        #[arg(long)]
+        target: Option<String>,
         /// Providers to drain, matched on each event's indexed `t` tag (the
         /// provider names from hookstrd's [ingest_tokens]). Empty = all;
         /// run one drain per consumer, each scoped to what it handles.
@@ -100,10 +105,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Drain {
             config,
             once,
+            target,
             providers,
         } => {
             let mut cfg = DrainConfig::load(config.as_deref())?;
             cfg.providers = providers;
+            if target.is_some() {
+                cfg.target_base = target;
+            }
             drain(cfg, !once).await
         }
         Command::Init { relay_url, config } => init(relay_url, config),

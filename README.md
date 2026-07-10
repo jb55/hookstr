@@ -153,8 +153,13 @@ This connects, AUTHs, negentropy-syncs the missed backlog, replays it
 oldest-first, and then follows — each new webhook replays in under a
 second while the connection is up. Pass `--once` to exit after the
 catch-up replay instead (cron-style). Positional args scope the drain
-to specific providers (`hookstr drain acme stripe`; empty = all) — run
-one drain per consumer, each scoped to what it handles.
+to specific providers (`hookstr drain acme stripe`; empty = all), and
+`--target` overrides the config's `target_base` for the run — so one
+config serves several consumers, each running its own scoped drain:
+
+```
+$ hookstr drain --target http://localhost:3003/api/v1/webhook acme
+```
 
 Replay state (attempt counts, backoff) is client-local in redb, keyed by
 event id — a replay target being down (consumer not running) just means
