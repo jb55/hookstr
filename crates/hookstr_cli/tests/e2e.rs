@@ -1,5 +1,5 @@
 //! End-to-end: the real hookstrd ingest router + NIP-42 relay run in-process,
-//! and the real `hookstr_cli` binary drains against them — provider POST ->
+//! and the real `hookstr` binary drains against them — provider POST ->
 //! durable 204 -> authed negentropy drain -> byte-exact replay to a local
 //! target, plus redb dedupe, realtime follow, and allowlist refusal.
 
@@ -95,7 +95,7 @@ impl World {
         let nsec_path = tmp.path().join("drain.nsec");
         std::fs::write(&nsec_path, format!("{}\n", nsec(drain_secret))).expect("nsec");
 
-        let cfg_path = tmp.path().join("hookstr_cli.toml");
+        let cfg_path = tmp.path().join("hookstr.toml");
         std::fs::write(
             &cfg_path,
             format!(
@@ -139,7 +139,7 @@ target_base = "http://127.0.0.1:{target_port}/hook"
     }
 
     fn drain_cmd(&self) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_hookstr_cli"));
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_hookstr"));
         cmd.args(["drain", "--config", self.cfg_path.to_str().unwrap()])
             .current_dir(self.tmp.path());
         cmd

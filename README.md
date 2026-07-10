@@ -13,7 +13,7 @@ hookstr splits delivery from consumption:
   TLS-terminating reverse proxy. It accepts any webhook with a fast 2xx,
   persists it as a signed nostr event in [nostrdb], and serves those
   events back over an authenticated ([NIP-42]) embedded nostr relay.
-- **`hookstr_cli drain`** runs wherever the consumer lives. It
+- **`hookstr drain`** runs wherever the consumer lives. It
   negentropy-syncs ([NIP-77]) whatever it missed while offline, replays
   each delivery as a real HTTP request — byte-exact body, preserved
   headers — against a configured local target, then keeps following:
@@ -30,7 +30,7 @@ webhook, eventually, in order, with valid signatures.
                                                        ▲
                                  NIP-42 AUTH + NIP-77 sync + live REQ
                                                        │
- dev machine:  hookstr_cli ◀───────────────────────────┘
+ dev machine:  hookstr cli ◀───────────────────────────┘
                     │ replay (HTTP, raw body + preserved headers)
                     ▼
                http://localhost:PORT/<consumer webhook route>
@@ -70,7 +70,7 @@ Generate a keypair for the server, and get the drain client's pubkey
 (generated below) for the allowlist:
 
 ```
-$ hookstr_cli keygen
+$ hookstr keygen
 nsec:   nsec1...
 pubkey: 8f2a...
 ```
@@ -120,7 +120,7 @@ replay.
 
 ### Client (the dev machine)
 
-Generate the drain keypair (`hookstr_cli keygen` again — its pubkey is
+Generate the drain keypair (`hookstr keygen` again — its pubkey is
 what goes in `drain_pubkey` above), write the nsec to a file, and
 configure `hookstr_cli.toml` (see
 [config/hookstr_cli.example.toml](config/hookstr_cli.example.toml)):
@@ -148,7 +148,7 @@ target_base = "http://localhost:3000/webhooks"
 Then drain:
 
 ```
-$ hookstr_cli drain --config hookstr_cli.toml
+$ hookstr drain --config hookstr.toml
 ```
 
 This connects, AUTHs, negentropy-syncs the missed backlog, replays it

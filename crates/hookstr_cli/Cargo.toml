@@ -3,6 +3,10 @@ name = "hookstr_cli"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "hookstr"
+path = "src/main.rs"
+
 [dependencies]
 hookstr-core.workspace = true
 nostrdb.workspace = true
