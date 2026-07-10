@@ -74,6 +74,20 @@ enum Command {
         /// run one drain per consumer, each scoped to what it handles.
         providers: Vec<String>,
     },
+    /// First-run setup: generate the drain keypair and write it plus a
+    /// starter config under ~/.config/hookstr/, with the local mirror db
+    /// under ~/.local/share/hookstr/. Prints the pubkey that goes in
+    /// hookstrd's drain_pubkey allowlist. Refuses to overwrite an existing
+    /// config; an existing keypair is kept.
+    Init {
+        /// hookstrd's relay endpoint, e.g. wss://hooks.example.com
+        /// (placeholder written if omitted).
+        relay_url: Option<String>,
+        /// Where to write the TOML config file
+        /// (default: $XDG_CONFIG_HOME/hookstr/config.toml).
+        #[arg(long)]
+        config: Option<String>,
+    },
     /// Generate a keypair (for either side; the drain's pubkey goes in
     /// hookstrd's allowlist).
     Keygen,
@@ -92,19 +106,94 @@ async fn main() -> anyhow::Result<()> {
             cfg.providers = providers;
             drain(cfg, !once).await
         }
+        Command::Init { relay_url, config } => init(relay_url, config),
         Command::Keygen => keygen(),
     }
 }
 
-fn keygen() -> anyhow::Result<()> {
+/// Fresh keypair as (nsec, hex pubkey).
+fn generate_keypair() -> anyhow::Result<(String, String)> {
     let secp = secp256k1::Secp256k1::new();
     let (seckey, pubkey) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
     let nsec = bech32::encode::<bech32::Bech32>(
         bech32::Hrp::parse_unchecked("nsec"),
         &seckey.secret_bytes(),
     )?;
+    Ok((nsec, hex::encode(pubkey.x_only_public_key().0.serialize())))
+}
+
+fn keygen() -> anyhow::Result<()> {
+    let (nsec, pubkey) = generate_keypair()?;
     println!("nsec:   {nsec}");
-    println!("pubkey: {}", hex::encode(pubkey.x_only_public_key().0.serialize()));
+    println!("pubkey: {pubkey}");
+    Ok(())
+}
+
+fn init(relay_url: Option<String>, config: Option<String>) -> anyhow::Result<()> {
+    let cfg_path = match config {
+        Some(path) => std::path::PathBuf::from(path),
+        None => config::default_path()?,
+    };
+    anyhow::ensure!(
+        !cfg_path.exists(),
+        "{} already exists; delete it first to re-init",
+        cfg_path.display()
+    );
+    let cfg_dir = cfg_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", cfg_path.display()))?;
+    std::fs::create_dir_all(cfg_dir)?;
+
+    // Keep an existing keypair: it may already be on hookstrd's allowlist.
+    let nsec_path = cfg_dir.join("drain.nsec");
+    let pubkey = if nsec_path.exists() {
+        let nsec = std::fs::read_to_string(&nsec_path)?;
+        let (_seckey, pubkey) = nostr_relay_sync::parse_nsec(nsec.trim())
+            .map_err(|e| anyhow::anyhow!("{}: {e}", nsec_path.display()))?;
+        println!("keeping existing keypair {}", nsec_path.display());
+        hex::encode(pubkey)
+    } else {
+        let (nsec, pubkey) = generate_keypair()?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&nsec_path)?
+            .write_all(format!("{nsec}\n").as_bytes())?;
+        println!("wrote keypair {}", nsec_path.display());
+        pubkey
+    };
+
+    let data_dir = config::default_data_dir()?;
+    std::fs::create_dir_all(&data_dir)?;
+
+    let relay_url = relay_url.unwrap_or_else(|| "wss://hooks.example.com".to_owned());
+    std::fs::write(
+        &cfg_path,
+        format!(
+            r#"# hookstr drain config. See config/hookstr.example.toml in the repo for
+# every option (per-path replay targets, etc).
+relay_url = "{relay_url}"
+db_path = "{db}"
+redb_path = "{redb}"
+nsec_path = "{nsec}"
+
+# Deliveries are self-describing: a delivery ingested at
+# /ingest/<token>/acme/events replays to {{target_base}}/acme/events.
+target_base = "http://localhost:3000/webhooks"
+"#,
+            db = data_dir.join("ndb").display(),
+            redb = data_dir.join("replays.redb").display(),
+            nsec = nsec_path.display(),
+        ),
+    )?;
+    println!("wrote config {}", cfg_path.display());
+    println!();
+    println!("pubkey: {pubkey}");
+    println!("        ^ add this to hookstrd's drain_pubkey allowlist");
+    println!("edit the config's relay_url / target_base, then run `hookstr drain`");
     Ok(())
 }
 

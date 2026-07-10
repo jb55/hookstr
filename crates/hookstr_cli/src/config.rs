@@ -33,12 +33,12 @@ pub struct DrainConfig {
 
 impl DrainConfig {
     pub fn load(path: Option<&str>) -> anyhow::Result<Self> {
-        let path = match path {
-            Some(path) => std::path::PathBuf::from(path),
-            None => default_path()?,
+        let (path, hint) = match path {
+            Some(path) => (std::path::PathBuf::from(path), ""),
+            None => (default_path()?, " (run `hookstr init` to create one)"),
         };
         let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading config {}", path.display()))?;
+            .with_context(|| format!("reading config {}{hint}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
@@ -64,11 +64,22 @@ impl DrainConfig {
 
 /// `$XDG_CONFIG_HOME/hookstr/config.toml`, with the usual `~/.config`
 /// fallback when XDG_CONFIG_HOME is unset.
-fn default_path() -> anyhow::Result<std::path::PathBuf> {
+pub fn default_path() -> anyhow::Result<std::path::PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         return Ok(std::path::PathBuf::from(xdg).join("hookstr/config.toml"));
     }
     let home = std::env::var_os("HOME")
         .ok_or_else(|| anyhow::anyhow!("neither XDG_CONFIG_HOME nor HOME is set; pass --config"))?;
     Ok(std::path::PathBuf::from(home).join(".config/hookstr/config.toml"))
+}
+
+/// `$XDG_DATA_HOME/hookstr`, with the usual `~/.local/share` fallback: where
+/// `init` points the local mirror db and replay state.
+pub fn default_data_dir() -> anyhow::Result<std::path::PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        return Ok(std::path::PathBuf::from(xdg).join("hookstr"));
+    }
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| anyhow::anyhow!("neither XDG_DATA_HOME nor HOME is set"))?;
+    Ok(std::path::PathBuf::from(home).join(".local/share/hookstr"))
 }

@@ -120,27 +120,28 @@ replay.
 
 ### Client (the dev machine)
 
-Generate the drain keypair (`hookstr keygen` again — its pubkey is
-what goes in `drain_pubkey` above), write the nsec to a file, and
-configure `~/.config/hookstr/config.toml` (or pass `--config`; see
-[config/hookstr.example.toml](config/hookstr.example.toml)):
+`hookstr init` does the first-run setup: it generates the drain keypair
+(written 0600 next to the config), writes a starter
+`~/.config/hookstr/config.toml` with the local mirror db under
+`~/.local/share/hookstr/`, and prints the pubkey that goes in hookstrd's
+`drain_pubkey` allowlist:
 
-```toml
-relay_url = "wss://hooks.example.com"
-db_path = "/var/lib/hookstr-cli/ndb"
-redb_path = "/var/lib/hookstr-cli/replays.redb"
-nsec_path = "/var/lib/hookstr-cli/drain.nsec"
-
-# Deliveries are self-describing: the event's path tag mirrors everything
-# after the token in the ingest URL, so a delivery ingested at
-# /ingest/<token>/acme/events replays to {target_base}/acme/events...
-target_base = "http://localhost:3000/webhooks"
-
-# ...with optional per-path overrides for consumers whose routes don't
-# mirror the ingest path.
-#[targets]
-#"acme/events" = "http://localhost:4000/hooks"
 ```
+$ hookstr init wss://hooks.example.com
+wrote keypair /home/you/.config/hookstr/drain.nsec
+wrote config /home/you/.config/hookstr/config.toml
+
+pubkey: 9b3d462694fc29e57ff202a8e8f4caa68c668e5034ac1c00c7c21dadf92a2aa0
+        ^ add this to hookstrd's drain_pubkey allowlist
+```
+
+Then edit the config's `target_base` — deliveries are self-describing
+(the event's `path` tag mirrors everything after the token in the ingest
+URL), so a delivery ingested at `/ingest/<token>/acme/events` replays to
+`{target_base}/acme/events`. A `[targets]` table holds per-path overrides
+for consumers whose routes don't mirror the ingest path; see
+[config/hookstr.example.toml](config/hookstr.example.toml) for every
+option.
 
 Then drain:
 

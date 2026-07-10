@@ -308,6 +308,55 @@ async fn follow_replays_new_webhooks_in_realtime() {
 }
 
 #[tokio::test]
+async fn init_writes_keypair_and_config_once() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let init = |relay: &'static str| {
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_hookstr"));
+        cmd.args(["init", relay])
+            .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
+            .env("XDG_DATA_HOME", tmp.path().join("data"));
+        async move { cmd.output().await.expect("init runs") }
+    };
+
+    let out = init("wss://first.example").await;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let pubkey = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("pubkey: "))
+        .expect("init prints the allowlist pubkey")
+        .to_owned();
+
+    let cfg_path = tmp.path().join("cfg/hookstr/config.toml");
+    let cfg = std::fs::read_to_string(&cfg_path).expect("config written");
+    assert!(cfg.contains(r#"relay_url = "wss://first.example""#), "{cfg}");
+    let nsec_path = tmp.path().join("cfg/hookstr/drain.nsec");
+    let nsec = std::fs::read_to_string(&nsec_path).expect("nsec written");
+    let (_, pk) = nostr_relay_sync::parse_nsec(nsec.trim()).expect("valid nsec");
+    assert_eq!(hex::encode(pk), pubkey, "printed pubkey matches the keypair");
+
+    // A second init must not clobber the config...
+    let out = init("wss://second.example").await;
+    assert!(!out.status.success(), "re-init must refuse");
+    assert!(
+        std::fs::read_to_string(&cfg_path)
+            .unwrap()
+            .contains("first.example")
+    );
+
+    // ...and after deleting it, the existing keypair is kept (it may already
+    // be on hookstrd's allowlist).
+    std::fs::remove_file(&cfg_path).unwrap();
+    let out = init("wss://second.example").await;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(&nsec_path).unwrap(),
+        nsec,
+        "re-init keeps the existing keypair"
+    );
+}
+
+#[tokio::test]
 async fn drain_with_a_key_off_the_allowlist_is_refused() {
     let world = World::start(&INTRUDER_SECRET).await;
 
