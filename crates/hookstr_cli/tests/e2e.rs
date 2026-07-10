@@ -216,9 +216,11 @@ async fn drain_once_replays_ingested_webhooks_byte_exact() {
         StatusCode::NO_CONTENT,
         "ingest answers 204 once durable"
     );
+    // The token alone authenticates: the path after it is free-form and need
+    // not start with the provider name the token is registered under.
     assert_eq!(
         world
-            .ingest("acme/blob", &[("x-webhook-id", "wh_2")], blob_body)
+            .ingest("v1/blob", &[("x-webhook-id", "wh_2")], blob_body)
             .await,
         StatusCode::NO_CONTENT
     );
@@ -249,7 +251,7 @@ async fn drain_once_replays_ingested_webhooks_byte_exact() {
         Some("application/json")
     );
 
-    let (headers, body) = &by_path["acme/blob"];
+    let (headers, body) = &by_path["v1/blob"];
     assert_eq!(body, blob_body, "binary body survives the base64 roundtrip");
     assert_eq!(headers.get("x-webhook-id").map(String::as_str), Some("wh_2"));
 

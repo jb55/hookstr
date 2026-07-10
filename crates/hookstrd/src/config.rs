@@ -25,9 +25,10 @@ pub struct HookstrdConfig {
     pub ingest_addr: String,
     /// nostrdb_relay ws listener, plaintext localhost.
     pub relay_addr: SocketAddr,
-    /// Per-provider ingest secrets. The `{token}` in the URL must match the
-    /// token registered for that `{provider}`, so each provider gets its own
-    /// secret you can revoke without disturbing the others.
+    /// Per-provider ingest secrets. The `{token}` in the URL alone
+    /// authenticates a delivery and names its provider, so each provider gets
+    /// its own secret you can revoke without disturbing the others. Values
+    /// must be unique or the token -> provider lookup would be ambiguous.
     pub ingest_tokens: HashMap<String, String>,
     /// File containing the server nsec (not the key itself — keep secrets
     /// out of config that might get committed).
@@ -41,7 +42,14 @@ impl HookstrdConfig {
         let args = Args::parse();
         let text = std::fs::read_to_string(&args.config)
             .with_context(|| format!("reading config {}", args.config))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", args.config))
+        let cfg: Self =
+            toml::from_str(&text).with_context(|| format!("parsing {}", args.config))?;
+        let unique: std::collections::HashSet<_> = cfg.ingest_tokens.values().collect();
+        anyhow::ensure!(
+            unique.len() == cfg.ingest_tokens.len(),
+            "ingest_tokens values must be unique: a token names its provider"
+        );
+        Ok(cfg)
     }
 
     pub fn seckey(&self) -> anyhow::Result<[u8; 32]> {

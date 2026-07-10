@@ -9,9 +9,9 @@ pub struct DrainConfig {
     /// wss://hooks.example.com
     pub relay_url: String,
     /// Providers this drain pulls, matched on each event's indexed `t` tag
-    /// (the `{provider}` ingest-path segment). Run one drain per consumer,
-    /// each scoped to what it handles. Omit or leave empty to pull every
-    /// provider.
+    /// (the provider name from hookstrd's `[ingest_tokens]`). Run one drain
+    /// per consumer, each scoped to what it handles. Omit or leave empty to
+    /// pull every provider.
     #[serde(default)]
     pub providers: Vec<String>,
     /// Local mirror nostrdb (negentropy needs the full local set).
@@ -20,10 +20,10 @@ pub struct DrainConfig {
     pub redb_path: String,
     /// File containing the drain nsec (its pubkey is hookstrd's allowlist).
     pub nsec_path: String,
-    /// Default replay routing. The event's `path` tag mirrors the ingest
-    /// URL's `{provider}/{type}` suffix, so deliveries are self-describing:
-    /// they replay to `{target_base}/{provider}/{type}` with no per-path
-    /// config as long as the consumer's route mirrors the ingest path too.
+    /// Default replay routing. The event's `path` tag mirrors everything
+    /// after the token in the ingest URL, so deliveries are self-describing:
+    /// they replay to `{target_base}/{path}` with no per-path config as long
+    /// as the consumer's route mirrors the ingest path too.
     pub target_base: Option<String>,
     /// Per-path overrides for consumers whose route does not mirror the
     /// ingest path, e.g. "acme/events" = "http://localhost:3000/hooks".

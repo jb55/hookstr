@@ -22,15 +22,18 @@ pub struct Ingest {
     pub ndb: Ndb,
     pub seckey: [u8; 32],
     /// Per-provider secrets baked into the URL registered with each provider:
-    /// `{provider} -> token`. A leaked token only works for its own provider
-    /// and can be revoked without disturbing the others.
+    /// `{provider} -> token`. The token alone authenticates a delivery and
+    /// names its provider, so a leaked token can only forge events tagged
+    /// with its own provider and can be revoked without disturbing the
+    /// others. Values must be unique (config load enforces this) or the
+    /// token -> provider lookup would be ambiguous.
     pub tokens: HashMap<String, String>,
 }
 
-/// The ingest router: `POST /ingest/{token}/{provider}/{type}` -> durable 204.
+/// The ingest router: `POST /ingest/{token}/{any/path}` -> durable 204.
 pub fn router(ingest: Ingest) -> Router {
     Router::new()
-        .route("/ingest/{token}/{provider}/{type}", post(receive))
+        .route("/ingest/{token}/{*path}", post(receive))
         .with_state(ingest)
 }
 
@@ -39,19 +42,25 @@ pub fn router(ingest: Ingest) -> Router {
 #[axum::debug_handler]
 async fn receive(
     State(ingest): State<Ingest>,
-    Path((token, provider, hook_type)): Path<(String, String, String)>,
+    Path((token, path)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
-    // A provider is authenticated by the secret registered for it. An unknown
-    // provider or a wrong token is indistinguishable from a missing route
-    // (404), so probing reveals neither which providers exist nor their paths.
-    if ingest.tokens.get(&provider) != Some(&token) {
+    // The token alone authenticates the delivery and names its provider; the
+    // rest of the URL is free-form routing data echoed into the path tag. A
+    // wrong token is indistinguishable from a missing route (404), so probing
+    // reveals neither which providers exist nor their paths.
+    let Some(provider) = ingest
+        .tokens
+        .iter()
+        .find(|(_, t)| **t == token)
+        .map(|(provider, _)| provider.clone())
+    else {
         return StatusCode::NOT_FOUND;
-    }
+    };
 
     let rec = hookstr_core::WebhookRecord {
-        path: format!("{provider}/{hook_type}"),
+        path,
         provider,
         headers: headers
             .iter()

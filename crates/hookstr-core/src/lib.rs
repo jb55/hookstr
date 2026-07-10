@@ -13,9 +13,10 @@
 //!   an `["encoding","base64"]` tag. Byte-exactness is load-bearing: the
 //!   consumer HMACs the raw body against `x-signature`.
 //! - tags:
-//!   - `["t", <provider>]` — provider discriminator ("acme").
+//!   - `["t", <provider>]` — provider discriminator ("acme"), named by the
+//!     ingest token that authenticated the delivery.
 //!     Single-letter so nostrdb / relays index it (`Filter::tags(.., 't')`).
-//!   - `["path", <provider>/<type>]` — full ingest path suffix
+//!   - `["path", <path>]` — everything after the token in the ingest URL
 //!     ("acme/events"); the replay-target lookup key.
 //!   - `["header", <name>, <value>]` — one per preserved request header,
 //!     name lowercased, hop-by-hop and transport headers scrubbed.
@@ -72,9 +73,11 @@ pub fn keep_header(name: &str) -> bool {
 /// A webhook delivery, as captured at ingest or reconstructed at replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebhookRecord {
-    /// Provider discriminator, e.g. "acme". First path segment.
+    /// Provider discriminator, e.g. "acme". Named by the ingest token that
+    /// authenticated the delivery.
     pub provider: String,
-    /// Full ingest path suffix, e.g. "acme/events". Replay routing key.
+    /// Everything after the token in the ingest URL, e.g. "acme/events".
+    /// Replay routing key.
     pub path: String,
     /// Preserved headers, lowercased names, request order. Already scrubbed.
     pub headers: Vec<(String, String)>,

@@ -11,10 +11,9 @@ nsec_path = "/var/lib/hookstr-cli/drain.nsec"
 # what it handles. Omit or leave empty to pull every provider.
 providers = ["acme"]
 
-# Deliveries are self-describing: the event's path tag mirrors the ingest
-# URL's {provider}/{type} suffix, so everything replays to
-# {target_base}/{provider}/{type} when the consumer's route mirrors the
-# ingest path.
+# Deliveries are self-describing: the event's path tag mirrors everything
+# after the token in the ingest URL, so everything replays to
+# {target_base}/{path} when the consumer's route mirrors the ingest path.
 target_base = "http://localhost:3000/webhooks"
 
 # Optional per-path overrides for consumers whose route doesn't mirror the

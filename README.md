@@ -83,9 +83,14 @@ db_path = "/var/lib/hookstr/ndb"
 mapsize = 34359738368            # 32 GiB; store-everything, so be generous
 ingest_addr = "127.0.0.1:8080"
 relay_addr = "127.0.0.1:8081"
-ingest_token = "long-random-secret"  # the spam gate in the ingest URL
 nsec_path = "/var/lib/hookstr/server.nsec"
 drain_pubkey = "<drain client pubkey, hex>"
+
+# Per-provider ingest secrets; each token authenticates and names its
+# provider, and can be rotated/revoked without disturbing the others.
+[ingest_tokens]
+acme = "long-random-secret"
+stripe = "another-long-random-secret"
 ```
 
 Run it behind any TLS-terminating proxy; Caddy sketch:
@@ -105,10 +110,13 @@ hooks.example.com {
 $ hookstrd --config hookstrd.toml
 ```
 
-Register `https://hooks.example.com/ingest/<token>/<provider>/<type>`
-with each provider — e.g. `/ingest/s3cret/acme/events`. The `{token}` is
-the spam gate for a necessarily public endpoint; payload authenticity is
-still enforced by the consumer's own signature check on replay.
+Register `https://hooks.example.com/ingest/<token>/<any/path>` with each
+provider — e.g. `/ingest/s3cret/acme/events`. The token alone
+authenticates the delivery (and tags it with its provider); the rest of
+the path is free-form and becomes the replay routing key. The token is
+also the spam gate for a necessarily public endpoint; payload
+authenticity is still enforced by the consumer's own signature check on
+replay.
 
 ### Client (the dev machine)
 
@@ -119,13 +127,16 @@ configure `hookstr_cli.toml` (see
 
 ```toml
 relay_url = "wss://hooks.example.com"
+# Optionally scope this drain to specific providers (empty/omitted = all);
+# run one drain per consumer, each scoped to what it handles.
+#providers = ["acme"]
 db_path = "/var/lib/hookstr-cli/ndb"
 redb_path = "/var/lib/hookstr-cli/replays.redb"
 nsec_path = "/var/lib/hookstr-cli/drain.nsec"
 
-# Deliveries are self-describing: the event's path tag mirrors the ingest
-# URL's {provider}/{type} suffix, so everything replays to
-# {target_base}/{provider}/{type}...
+# Deliveries are self-describing: the event's path tag mirrors everything
+# after the token in the ingest URL, so a delivery ingested at
+# /ingest/<token>/acme/events replays to {target_base}/acme/events...
 target_base = "http://localhost:3000/webhooks"
 
 # ...with optional per-path overrides for consumers whose routes don't
