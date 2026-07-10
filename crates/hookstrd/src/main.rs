@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let app = hookstrd::router(Ingest {
         ndb,
         seckey: cfg.seckey()?,
-        token: cfg.ingest_token.clone(),
+        tokens: cfg.ingest_tokens.clone(),
     });
     let listener = tokio::net::TcpListener::bind(&cfg.ingest_addr).await?;
     tracing::info!("ingest listening on http://{}", cfg.ingest_addr);

@@ -8,6 +8,12 @@ use std::collections::HashMap;
 pub struct DrainConfig {
     /// wss://hooks.example.com
     pub relay_url: String,
+    /// Providers this drain pulls, matched on each event's indexed `t` tag
+    /// (the `{provider}` ingest-path segment). Run one drain per consumer,
+    /// each scoped to what it handles. Omit or leave empty to pull every
+    /// provider.
+    #[serde(default)]
+    pub providers: Vec<String>,
     /// Local mirror nostrdb (negentropy needs the full local set).
     pub db_path: String,
     /// Replay bookkeeping (event id -> status/attempts/next_retry).

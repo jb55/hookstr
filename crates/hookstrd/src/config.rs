@@ -3,6 +3,7 @@
 use anyhow::Context;
 use clap::Parser;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 #[derive(Parser)]
@@ -24,8 +25,10 @@ pub struct HookstrdConfig {
     pub ingest_addr: String,
     /// nostrdb_relay ws listener, plaintext localhost.
     pub relay_addr: SocketAddr,
-    /// Secret path segment in the URL registered with providers.
-    pub ingest_token: String,
+    /// Per-provider ingest secrets. The `{token}` in the URL must match the
+    /// token registered for that `{provider}`, so each provider gets its own
+    /// secret you can revoke without disturbing the others.
+    pub ingest_tokens: HashMap<String, String>,
     /// File containing the server nsec (not the key itself — keep secrets
     /// out of config that might get committed).
     pub nsec_path: String,

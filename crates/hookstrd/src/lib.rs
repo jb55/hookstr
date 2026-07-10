@@ -10,6 +10,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use nostrdb::{Filter, Ndb, SubscriptionStream};
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// How long ingest waits for nostrdb's background writer to commit a note
@@ -20,8 +21,10 @@ const INGEST_DEADLINE: Duration = Duration::from_secs(5);
 pub struct Ingest {
     pub ndb: Ndb,
     pub seckey: [u8; 32],
-    /// Long random secret baked into the URL registered with providers.
-    pub token: String,
+    /// Per-provider secrets baked into the URL registered with each provider:
+    /// `{provider} -> token`. A leaked token only works for its own provider
+    /// and can be revoked without disturbing the others.
+    pub tokens: HashMap<String, String>,
 }
 
 /// The ingest router: `POST /ingest/{token}/{provider}/{type}` -> durable 204.
@@ -40,7 +43,10 @@ async fn receive(
     headers: HeaderMap,
     body: Bytes,
 ) -> StatusCode {
-    if token != ingest.token {
+    // A provider is authenticated by the secret registered for it. An unknown
+    // provider or a wrong token is indistinguishable from a missing route
+    // (404), so probing reveals neither which providers exist nor their paths.
+    if ingest.tokens.get(&provider) != Some(&token) {
         return StatusCode::NOT_FOUND;
     }
 

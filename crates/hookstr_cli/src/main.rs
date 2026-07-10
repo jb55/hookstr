@@ -37,6 +37,17 @@ const MAX_LOCAL_QUERY: i32 = 1_000_000;
 /// How long `--follow` waits before redialing a dropped connection.
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
+/// This drain's webhook set: our dedicated kind, narrowed to the configured
+/// providers via the indexed `t` tag. Empty `providers` means every provider
+/// (kind-only). Use `.json()` for the wire form on REQ / reconcile.
+fn webhook_filter(providers: &[String]) -> Filter {
+    let mut b = Filter::new().kinds([hookstr_core::KIND_WEBHOOK as u64]);
+    if !providers.is_empty() {
+        b = b.tags(providers.iter().map(String::as_str), 't');
+    }
+    b.build()
+}
+
 #[derive(Parser)]
 #[command(about = "hookstr drain: sync stored webhooks and replay them locally")]
 struct Args {
@@ -124,7 +135,7 @@ async fn connect_and_drain(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    catch_up(&mut relay, ndb).await?;
+    catch_up(&cfg.providers, &mut relay, ndb).await?;
 
     // Follow plumbing goes up *before* the backlog replay so no arrival can
     // fall between the two. Notifications come off the local nostrdb
@@ -133,17 +144,13 @@ async fn connect_and_drain(
     // recent events, which both plugs the gap since the last catch-up page
     // and is harmlessly deduped by ndb otherwise.
     let mut incoming = if follow {
-        let sub = {
-            let filter = Filter::new()
-                .kinds([hookstr_core::KIND_WEBHOOK as u64])
-                .build();
-            ndb.subscribe(&[filter])?
-        };
+        let filter = webhook_filter(&cfg.providers);
+        let wire = filter.json().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let sub = ndb.subscribe(&[filter])?;
         let stream = SubscriptionStream::new(ndb.clone(), sub).notes_per_await(1);
 
-        let filter = json!({ "kinds": [hookstr_core::KIND_WEBHOOK] });
         relay
-            .stream_into(ndb, &filter.to_string())
+            .stream_into(ndb, &wire)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Some(stream)
@@ -185,17 +192,18 @@ async fn connect_and_drain(
 /// O(difference) on the wire — then fetch the missing events by id.
 /// Pull-only: `Diff::have` is ignored (hookstrd's db is the source of truth;
 /// nothing pushes into it from here).
-async fn catch_up(relay: &mut nostr_relay_sync::Relay, ndb: &Ndb) -> anyhow::Result<()> {
-    let wire = json!({ "kinds": [hookstr_core::KIND_WEBHOOK] });
-    let storage = {
-        let filter = Filter::new()
-            .kinds([hookstr_core::KIND_WEBHOOK as u64])
-            .build();
-        nostr_relay_sync::local_set(ndb, &filter).map_err(|e| anyhow::anyhow!("{e}"))?
-    };
+async fn catch_up(
+    providers: &[String],
+    relay: &mut nostr_relay_sync::Relay,
+    ndb: &Ndb,
+) -> anyhow::Result<()> {
+    let filter = webhook_filter(providers);
+    let wire = filter.json().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let storage =
+        nostr_relay_sync::local_set(ndb, &filter).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let diff = relay
-        .reconcile(&wire.to_string(), storage)
+        .reconcile(&wire, storage)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -225,9 +233,7 @@ async fn replay_backlog(
     // Collected owned so the non-Send Transaction is gone before the awaits.
     let mut backlog = {
         let txn = Transaction::new(ndb)?;
-        let filter = Filter::new()
-            .kinds([hookstr_core::KIND_WEBHOOK as u64])
-            .build();
+        let filter = webhook_filter(&cfg.providers);
         ndb.query(&txn, &[filter], MAX_LOCAL_QUERY)?
             .into_iter()
             .map(|result| (*result.note.id(), result.note.created_at()))

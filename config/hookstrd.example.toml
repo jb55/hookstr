@@ -3,9 +3,16 @@ db_path = "/var/lib/hookstr/ndb"
 mapsize = 34359738368 # 32 GiB; store-everything, so be generous
 ingest_addr = "127.0.0.1:8080"
 relay_addr = "127.0.0.1:8081"
-# Long random secret; this exact string goes in the URL registered with each
-# provider: https://hooks.example.com/ingest/<token>/acme/events
-ingest_token = "CHANGE-ME-long-random-string"
 nsec_path = "/var/lib/hookstr/server.nsec"
 # NIP-42 allowlist: the drain client's pubkey (hex)
 drain_pubkey = "CHANGE-ME"
+
+# Per-provider ingest secrets: {provider} -> long random token. The token
+# goes in the URL you register with that provider:
+#   https://hooks.example.com/ingest/<token>/<provider>/<type>
+# Each provider gets its own token, so a leak only exposes that provider and
+# you revoke it by removing (or rotating) its line — the others keep working.
+# (Keep this table last: TOML tables capture every key below them.)
+[ingest_tokens]
+acme = "CHANGE-ME-long-random-string"
+stripe = "CHANGE-ME-another-long-random-string"

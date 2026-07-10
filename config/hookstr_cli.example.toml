@@ -6,6 +6,11 @@ db_path = "/var/lib/hookstr-cli/ndb"
 redb_path = "/var/lib/hookstr-cli/replays.redb"
 nsec_path = "/var/lib/hookstr-cli/drain.nsec"
 
+# Providers this drain pulls, matched on each event's indexed `t` tag (the
+# {provider} ingest-path segment). Run one drain per consumer, each scoped to
+# what it handles. Omit or leave empty to pull every provider.
+providers = ["acme"]
+
 # Deliveries are self-describing: the event's path tag mirrors the ingest
 # URL's {provider}/{type} suffix, so everything replays to
 # {target_base}/{provider}/{type} when the consumer's route mirrors the

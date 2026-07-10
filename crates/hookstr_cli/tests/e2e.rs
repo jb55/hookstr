@@ -72,7 +72,7 @@ impl World {
         let app = hookstrd::router(hookstrd::Ingest {
             ndb,
             seckey: SERVER_SECRET,
-            token: TOKEN.to_owned(),
+            tokens: HashMap::from([("acme".to_owned(), TOKEN.to_owned())]),
         });
         let ingest = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
