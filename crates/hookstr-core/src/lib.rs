@@ -27,7 +27,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use nostrdb::{Note, NoteBuildOptions, NoteBuilder};
+use nostrdb::{NdbStr, NdbStrVariant, Note, NoteBuildOptions, NoteBuilder};
 
 /// Regular (non-replaceable, non-ephemeral: 1000 <= n < 10000) kind for a
 /// stored webhook delivery. 3003 is unassigned in the NIPs registry at time
@@ -68,6 +68,18 @@ pub const SCRUBBED_HEADERS: &[&str] = &[
 /// replayed). `name` must already be lowercase (axum's `HeaderMap` keys are).
 pub fn keep_header(name: &str) -> bool {
     !SCRUBBED_HEADERS.contains(&name)
+}
+
+/// A header value at replay time. nostrdb stores any 64-char-hex tag string
+/// (e.g. an HMAC-SHA256 `x-signature`) with the packed-id flag, so reading it
+/// back as a `str` yields nothing — the value comes out as a 32-byte `Id`.
+/// Re-hex those so a hex signature survives the store/replay round-trip
+/// byte-for-byte; anything genuinely textual passes through untouched.
+fn header_value(value: NdbStr<'_>) -> String {
+    match value.variant() {
+        NdbStrVariant::Str(text) => text.to_owned(),
+        NdbStrVariant::Id(id) => hex::encode(id),
+    }
 }
 
 /// A webhook delivery, as captured at ingest or reconstructed at replay.
@@ -119,7 +131,10 @@ impl std::error::Error for SchemaError {}
 /// `created_at` is set explicitly to `received_at_ms / 1000` instead of
 /// letting [`NoteBuildOptions`] stamp "now", so the negentropy ordering key
 /// and the `received_at` tag can never disagree.
-pub fn sign_webhook_note(rec: &WebhookRecord, seckey: &[u8; 32]) -> Result<Note<'static>, SchemaError> {
+pub fn sign_webhook_note(
+    rec: &WebhookRecord,
+    seckey: &[u8; 32],
+) -> Result<Note<'static>, SchemaError> {
     let (content, base64_encoded) = match std::str::from_utf8(&rec.body) {
         Ok(text) => (text.to_owned(), false),
         Err(_) => (BASE64.encode(&rec.body), true),
@@ -141,7 +156,11 @@ pub fn sign_webhook_note(rec: &WebhookRecord, seckey: &[u8; 32]) -> Result<Note<
         .tag_str(&rec.received_at_ms.to_string());
 
     for (name, value) in &rec.headers {
-        b = b.start_tag().tag_str(TAG_HEADER).tag_str(name).tag_str(value);
+        b = b
+            .start_tag()
+            .tag_str(TAG_HEADER)
+            .tag_str(name)
+            .tag_str(value);
     }
 
     if base64_encoded {
@@ -173,8 +192,8 @@ pub fn parse_webhook_note(note: &Note<'_>) -> Result<WebhookRecord, SchemaError>
                 received_at_ms = tag.get_str(1).and_then(|s| s.parse().ok());
             }
             Some(TAG_HEADER) => {
-                if let (Some(name), Some(value)) = (tag.get_str(1), tag.get_str(2)) {
-                    headers.push((name.to_owned(), value.to_owned()));
+                if let (Some(name), Some(value)) = (tag.get_str(1), tag.get(2).map(header_value)) {
+                    headers.push((name.to_owned(), value));
                 }
             }
             Some(TAG_ENCODING) => {
@@ -249,6 +268,36 @@ mod tests {
 
         assert_ne!(note.content().as_bytes(), rec.body.as_slice());
         assert_eq!(parse_webhook_note(&note).unwrap(), rec);
+    }
+
+    #[test]
+    fn roundtrips_64_hex_signature_header() {
+        // An HMAC-SHA256 signature is 64 lowercase hex chars, which nostrdb
+        // stores with the packed-id flag — get_str would return None and the
+        // header would silently vanish on replay, failing the consumer's
+        // signature check. Regression guard for that byte-exact round-trip.
+        let sig = "0161f28c2f5d54f98abe6cb82d8dea190fa3ee38059f79115e81bf679805706d";
+        let rec = WebhookRecord {
+            provider: "acme".to_owned(),
+            path: "acme/events".to_owned(),
+            headers: vec![
+                ("content-type".to_owned(), "application/json".to_owned()),
+                ("x-signature".to_owned(), sig.to_owned()),
+            ],
+            body: b"{}".to_vec(),
+            received_at_ms: 1_751_900_000_123,
+        };
+
+        let note = sign_webhook_note(&rec, &SECKEY).unwrap();
+        let parsed = parse_webhook_note(&note).unwrap();
+
+        // The hex value survives verbatim rather than vanishing as a packed id.
+        assert!(
+            parsed
+                .headers
+                .contains(&("x-signature".to_owned(), sig.to_owned()))
+        );
+        assert_eq!(parsed, rec);
     }
 
     #[test]
