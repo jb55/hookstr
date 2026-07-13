@@ -100,7 +100,14 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Default to info so drain progress (reconcile/replay/follow) is visible
+    // without RUST_LOG; RUST_LOG still overrides when set.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
     match Args::parse().command {
         Command::Drain {
             config,
