@@ -158,7 +158,7 @@ to specific providers (`hookstr drain acme stripe`; empty = all), and
 config serves several consumers, each running its own scoped drain:
 
 ```
-$ hookstr drain --target http://localhost:3003/api/v1/webhook acme
+$ hookstr drain --target http://localhost:3003 acme
 ```
 
 Replay state (attempt counts, backoff) is client-local in redb, keyed by
