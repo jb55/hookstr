@@ -20,7 +20,7 @@ nostrdb = { git = "https://github.com/kernelkind/nostrdb-rs", rev = "aca2f66e357
 
 # Extracted from notedeck as standalone repos so hookstr builds anywhere.
 nostrdb_relay = { git = "https://github.com/jb55/nostrdb-relay", rev = "28f9d854eb6abe48c79fcf2374d0dbcb8cd3abc5" }
-nostr_relay_sync = { git = "https://github.com/jb55/nostr-relay-sync", rev = "f61f2952948fb4d2bfdb3fd8375b95eac1c11f3e" }
+nostr_relay_sync = { git = "https://github.com/jb55/nostr-relay-sync", rev = "b18355eeb019d155911177a8ae61dac89f9f36ec" }
 
 # Keygen only. Same version nostr/notedeck pin so one copy builds.
 secp256k1 = { version = "0.30", features = ["rand", "std"] }

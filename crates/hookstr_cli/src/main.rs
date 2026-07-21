@@ -36,6 +36,11 @@ const PAGE: usize = 500;
 const MAX_LOCAL_QUERY: i32 = 1_000_000;
 /// How long `--follow` waits before redialing a dropped connection.
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+/// Keepalive ping cadence while following. Under nginx's default 60s
+/// `proxy_read_timeout` an idle follow subscription gets reset every minute;
+/// pinging well inside that window keeps the connection (and real-time replay)
+/// alive.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
 
 /// This drain's webhook set: our dedicated kind, narrowed to the configured
 /// providers via the indexed `t` tag. Empty `providers` means every provider
@@ -282,10 +287,18 @@ async fn connect_and_drain(
         return Ok(());
     };
     tracing::info!("following: replaying new webhooks as they arrive");
+    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // First tick fires immediately; skip it so we don't ping the instant we
+    // connect.
+    keepalive.tick().await;
     loop {
         tokio::select! {
             pumped = relay.pump_one(ndb) => {
                 pumped.map_err(|e| anyhow::anyhow!("{e}"))?;
+            }
+            _ = keepalive.tick() => {
+                relay.ping().await.map_err(|e| anyhow::anyhow!("{e}"))?;
             }
             keys = incoming.next() => {
                 let Some(keys) = keys else {

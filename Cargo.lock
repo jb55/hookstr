@@ -1471,7 +1471,7 @@ dependencies = [
 [[package]]
 name = "nostr_relay_sync"
 version = "0.1.0"
-source = "git+https://github.com/jb55/nostr-relay-sync?rev=f61f2952948fb4d2bfdb3fd8375b95eac1c11f3e#f61f2952948fb4d2bfdb3fd8375b95eac1c11f3e"
+source = "git+https://github.com/jb55/nostr-relay-sync?rev=b18355eeb019d155911177a8ae61dac89f9f36ec#b18355eeb019d155911177a8ae61dac89f9f36ec"
 dependencies = [
  "bech32",
  "dirs",
