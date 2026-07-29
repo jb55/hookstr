@@ -196,13 +196,20 @@ hooks.example.com {
         handle /ingest/* {
                 reverse_proxy localhost:8080
         }
-        # everything else → the nostr relay (ws upgrade passes through
-        # reverse_proxy automatically)
-        handle {
+        # ws clients (the drain) → nostr relay
+        @ws header Connection *Upgrade*
+        handle @ws {
                 reverse_proxy localhost:8081
+        }
+        # everything else (browsers hitting `/`) → axum landing page
+        handle {
+                reverse_proxy localhost:8080
         }
 }
 ```
+
+The relay only ever sees websocket upgrades; a plain browser GET to `/` falls
+through to axum, which serves a static info page (`GET /` in `hookstrd::router`).
 
 TLS is the proxy's problem. hookstrd listens plaintext on localhost only.
 

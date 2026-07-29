@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hookstr — store-and-forward webhooks over nostr</title>
+<meta name="description" content="A store-and-forward webhook service backed by nostr. Providers see one endpoint that never goes down; the consumer sees every webhook, eventually, in order, with valid signatures.">
+<style>
+  :root {
+    --bg: #0d0f12;
+    --panel: #14171c;
+    --border: #262b33;
+    --fg: #e6e9ef;
+    --muted: #8a93a3;
+    --accent: #7c5cff;
+    --accent-dim: #3a2f6b;
+    --green: #4ade80;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.65 var(--mono);
+    -webkit-font-smoothing: antialiased;
+    padding: 0 20px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 72px 0 96px; }
+
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  h1 {
+    font-size: 34px; margin: 0; letter-spacing: -0.5px; font-weight: 700;
+  }
+  h1 .prompt { color: var(--accent); }
+  .tag {
+    font-size: 12px; color: var(--green); border: 1px solid var(--border);
+    border-radius: 999px; padding: 2px 10px; background: var(--panel);
+  }
+  .lede { color: var(--muted); font-size: 16px; margin: 20px 0 40px; }
+  .lede strong { color: var(--fg); font-weight: 600; }
+
+  /* ── lifetime timeline (scroll-driven) ─────────────────── */
+  .life { position: relative; margin: 0 0 8px; }
+  /* rail + fill are centered under the 36px icon column (center x = 18) */
+  .life::before {
+    content: ""; position: absolute; left: 17px; top: 18px; bottom: 18px;
+    width: 2px; background: var(--border);
+  }
+  .life .fill {
+    position: absolute; left: 17px; top: 18px; width: 2px; height: 0;
+    background: var(--accent); border-radius: 2px;
+    transition: height .15s linear;
+  }
+  .stage, .gap { position: relative; display: flex; gap: 16px; padding-bottom: 22px; }
+  .stage:last-child { padding-bottom: 0; }
+  .stage .icon, .gap .icon {
+    flex: 0 0 36px; width: 36px; height: 36px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    border: 2px solid var(--border); background: var(--bg); color: var(--muted);
+    z-index: 1; transition: border-color .3s, color .3s, box-shadow .3s;
+  }
+  .stage .icon svg, .gap .icon svg { width: 19px; height: 19px; display: block; }
+  .stage.on .icon { border-color: var(--accent); color: var(--accent); }
+  .stage.now .icon { box-shadow: 0 0 0 5px var(--accent-dim); }
+  .gap .icon { border-style: dashed; }
+  .stage .body { flex: 1 1 auto; padding-top: 2px; }
+  .stage .t {
+    font-size: 10.5px; letter-spacing: .5px; color: var(--muted);
+    font-variant-numeric: tabular-nums; text-transform: uppercase;
+  }
+  .stage .t .loc { color: var(--fg); font-weight: 600; }
+  .stage .h {
+    font-size: 15px; font-weight: 700; color: var(--muted); margin-top: 1px;
+    transition: color .3s;
+  }
+  .stage.on .h { color: var(--fg); }
+  .stage .d { font-size: 13px; color: var(--muted); margin-top: 4px; line-height: 1.55; }
+  .stage .d code { color: var(--fg); background: none; padding: 0; }
+  .stage .form {
+    display: inline-block; margin-top: 9px; font-size: 10.5px; letter-spacing: .3px;
+    padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border);
+    opacity: .5; transition: opacity .3s;
+  }
+  .stage.on .form { opacity: 1; }
+  .form.http { color: #7fd1ff; border-color: #24435a; }
+  .form.nostr { color: var(--accent); border-color: var(--accent-dim); }
+
+  .gap { align-items: center; }
+  .gap .g {
+    font-size: 12px; color: var(--muted); display: inline-block;
+    border: 1px dashed var(--border); border-radius: 999px; padding: 5px 13px;
+    background: var(--panel);
+  }
+  .legend { font-size: 11.5px; color: var(--muted); margin: 2px 0 40px 52px; }
+  .legend .sw { display: inline-block; margin-right: 16px; }
+  .legend .k {
+    display: inline-block; width: 9px; height: 9px; border-radius: 2px;
+    vertical-align: middle; margin-right: 6px;
+  }
+  .legend .k.http { background: #7fd1ff; }
+  .legend .k.nostr { background: var(--accent); }
+
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 1.5px;
+    color: var(--muted); margin: 40px 0 18px; font-weight: 600;
+  }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px 18px 16px;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 14px; }
+  .card h3 code { color: var(--accent); background: none; padding: 0; }
+  .card p { margin: 0; color: var(--muted); font-size: 13.5px; line-height: 1.6; }
+
+  ul.points { list-style: none; padding: 0; margin: 0; }
+  ul.points li {
+    padding: 12px 0; border-bottom: 1px solid var(--border);
+    color: var(--muted); font-size: 14px;
+  }
+  ul.points li:last-child { border-bottom: 0; }
+  ul.points li b { color: var(--fg); font-weight: 600; display: block; margin-bottom: 2px; }
+
+  footer {
+    margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 13px; display: flex; gap: 20px; flex-wrap: wrap;
+  }
+  .rl { color: var(--muted); }
+  .rl code { color: var(--fg); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="prompt">$</span> hookstr</h1>
+    <span class="tag instance-only">● relay online</span>
+  </header>
+
+  <p class="lede">
+    A <strong>store-and-forward webhook service</strong> backed by
+    <a href="https://github.com/nostr-protocol/nostr">nostr</a>. Webhook providers demand an
+    always-online HTTPS endpoint and auto-disable it after repeated delivery failures. A consumer
+    behind a tunnel — sometimes offline, tunnel URL rotating — loses that race constantly.
+    hookstr splits delivery from consumption so <strong>providers see one endpoint that never goes
+    down</strong>, and the consumer sees every webhook, eventually, in order, with valid signatures.
+  </p>
+
+  <h2>Lifetime of one webhook</h2>
+  <div class="life" id="life">
+    <div class="fill"></div>
+
+    <div class="stage">
+      <span class="icon"><!-- inbox / incoming -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="M8 9l4 4 4-4"/><path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg>
+      </span>
+      <div class="body">
+        <div class="t"><span class="loc">Provider → hookstrd</span> · T + 0 ms</div>
+        <div class="h">A webhook arrives</div>
+        <div class="d">A provider POSTs to <code>/ingest/{token}/…</code>. The reverse proxy terminates
+          TLS and hands the request to hookstrd's axum ingest.</div>
+        <span class="form http">raw HTTP · body + headers</span>
+      </div>
+    </div>
+
+    <div class="stage">
+      <span class="icon"><!-- key / signed -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="4.5"/><path d="M11.2 11.2L20 20"/><path d="M17 17l2-2"/><path d="M14 14l2-2"/></svg>
+      </span>
+      <div class="body">
+        <div class="t"><span class="loc">On hookstrd</span> · T + ~1 ms</div>
+        <div class="h">hookstrd turns it into a signed event</div>
+        <div class="d">axum wraps the raw body (base64), the kept headers, and the URL path into one
+          immutable <code>kind:3003</code> nostr event, signed by the server key.</div>
+        <span class="form nostr">nostr event · kind 3003</span>
+      </div>
+    </div>
+
+    <div class="stage">
+      <span class="icon"><!-- database / durable -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>
+      </span>
+      <div class="body">
+        <div class="t"><span class="loc">On hookstrd</span> · T + ~5 ms</div>
+        <div class="h">It's saved, and the provider gets its 204</div>
+        <div class="d">The event is committed to nostrdb. An id-subscription fires on commit — and only
+          <em>then</em> does the provider get its <code>204</code>. If the write fails it gets a
+          <code>5xx</code> and retries.</div>
+        <span class="form nostr">nostr event · kind 3003</span>
+      </div>
+    </div>
+
+    <div class="gap">
+      <span class="icon"><!-- hourglass / waiting -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12"/><path d="M6 21h12"/><path d="M6 3c0 4 3 5 6 9 3-4 6-5 6-9"/><path d="M6 21c0-4 3-5 6-9 3 4 6 5 6 9"/></svg>
+      </span>
+      <div class="g">Your machine is offline — the event sits on hookstrd for seconds or days.
+        Nothing is ever deleted.</div>
+    </div>
+
+    <div class="stage">
+      <span class="icon"><!-- sync arrows -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0113-6.2L20 8"/><path d="M20 3v5h-5"/><path d="M20 12a8 8 0 01-13 6.2L4 16"/><path d="M4 21v-5h5"/></svg>
+      </span>
+      <div class="body">
+        <div class="t"><span class="loc">hookstrd → your machine</span> · minutes or days later</div>
+        <div class="h">Your drain comes back and pulls it down</div>
+        <div class="d">The drain reconnects, authenticates (NIP-42), and negentropy-reconciles
+          (NIP-77) every event it missed — then keeps following new ones live.</div>
+        <span class="form nostr">nostr event · over ws</span>
+      </div>
+    </div>
+
+    <div class="stage">
+      <span class="icon"><!-- shield check / verified -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg>
+      </span>
+      <div class="body">
+        <div class="t"><span class="loc">On your machine</span> · signature checked</div>
+        <div class="h">The signature is checked before anything replays</div>
+        <div class="d">Replay acts only on notes read back out of the drain's <em>local</em> nostrdb,
+          after its ingester has verified the signature and committed them — never on wire frames.</div>
+        <span class="form nostr">nostr event · local db</span>
+      </div>
+    </div>
+
+    <div class="stage">
+      <span class="icon"><!-- send / replay out -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3L10 14"/><path d="M21 3l-7 18-4-8-8-4 19-6z"/></svg>
+      </span>
+      <div class="body">
+        <div class="t"><span class="loc">Your machine → your app</span> · replay</div>
+        <div class="h">It's replayed as the original HTTP request</div>
+        <div class="d">Unwrapped back into a real HTTP POST against your local target —
+          <b>byte-exact body, preserved headers</b> — so an <code>x-signature</code> HMAC still
+          validates.</div>
+        <span class="form http">raw HTTP · body + headers</span>
+      </div>
+    </div>
+
+    <div class="stage">
+      <span class="icon"><!-- check circle / consumed -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-5.5"/></svg>
+      </span>
+      <div class="body">
+        <div class="t"><span class="loc">In your app</span> · done</div>
+        <div class="h">Your app handles it, exactly as if it were live</div>
+        <div class="d">Your handler dedupes on the delivery-id header and returns <code>2xx</code>.
+          Delivery is at-least-once, so a crash-mid-replay retry is always safe.</div>
+        <span class="form http">raw HTTP · body + headers</span>
+      </div>
+    </div>
+  </div>
+  <div class="legend">
+    <span class="sw"><span class="k http"></span>raw HTTP</span>
+    <span class="sw"><span class="k nostr"></span>signed nostr event</span>
+    &nbsp;— wrapped once, then unwrapped byte-for-byte.
+  </div>
+
+  <h2>Two halves</h2>
+  <div class="grid">
+    <div class="card">
+      <h3><code>hookstrd</code></h3>
+      <p>Runs permanently on always-online infra behind a TLS-terminating reverse proxy. Accepts
+      any webhook with a fast 2xx, persists it as a signed nostr event in nostrdb, and serves those
+      events back over an authenticated (NIP-42) embedded nostr relay.</p>
+    </div>
+    <div class="card">
+      <h3><code>hookstr drain</code></h3>
+      <p>Runs wherever the consumer lives. Negentropy-syncs (NIP-77) whatever it missed while
+      offline, replays each delivery as a real HTTP request — byte-exact body, preserved headers —
+      against a local target, then keeps following in realtime.</p>
+    </div>
+  </div>
+
+  <h2>Design</h2>
+  <ul class="points">
+    <li><b>Byte-exact body preservation</b>Providers sign the raw HTTP body; bodies and signature
+      headers survive verbatim end-to-end, so consumers validate against the exact bytes.</li>
+    <li><b>At-least-once replay</b>Consumers dedupe on a delivery-id header, so conservative replay
+      (crash mid-replay, re-drain, retry) is safe.</li>
+    <li><b>Fast 2xx</b>Ingest accepts, waits for durable persistence, responds 204. 5xx only when
+      persistence itself failed, so the provider retries. Nothing downstream of the store is on the
+      ingest path.</li>
+    <li><b>Store everything</b>No deletion, ever. Negentropy reconciles over the full set, which
+      makes sync trivial.</li>
+    <li><b>Pull-only</b>The relay is read-only (NIP-42-gated, <code>accept_events = false</code>);
+      hookstrd's DB is the source of truth and nothing pushes into it over the wire.</li>
+  </ul>
+
+  <p class="rl instance-only" style="margin-top:32px">
+    This URL is a nostr relay. Point a NIP-42-authenticated client at
+    <code>wss://</code>&lt;this host&gt; to sync. Providers POST to
+    <code>/ingest/{token}/…</code>.
+  </p>
+
+  <footer>
+    <a href="https://github.com/jb55/hookstr">source on github ↗</a>
+    <a href="https://github.com/nostr-protocol/nostr">nostr protocol</a>
+    <a href="https://github.com/nostr-protocol/nips/blob/master/42.md">NIP-42 auth</a>
+    <a href="https://github.com/nostr-protocol/nips/blob/master/77.md">NIP-77 sync</a>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var life = document.getElementById('life');
+  if (!life) return;
+  var fill = life.querySelector('.fill');
+  var steps = Array.prototype.slice.call(life.querySelectorAll('.stage, .gap'));
+  if (!steps.length) return;
+
+  // The rail/fill start at 18px from the top of .life (icon center).
+  var RAIL_TOP = 18;
+
+  function centerOf(step) {
+    var icon = step.querySelector('.icon');
+    var lr = life.getBoundingClientRect(), ir = icon.getBoundingClientRect();
+    return ir.top - lr.top + ir.height / 2; // icon center, in .life coords
+  }
+
+  function update() {
+    // Progress point = where a line ~55% down the viewport crosses the rail.
+    var lr = life.getBoundingClientRect();
+    var refInLife = window.innerHeight * 0.55 - lr.top; // in .life coords
+    var last = centerOf(steps[steps.length - 1]);
+    var y = Math.max(RAIL_TOP, Math.min(refInLife, last));
+    fill.style.height = (y - RAIL_TOP) + 'px';
+
+    var activeIdx = -1;
+    steps.forEach(function (s, k) {
+      var on = centerOf(s) <= y + 0.5;
+      s.classList.toggle('on', on);
+      if (on) activeIdx = k;
+    });
+    steps.forEach(function (s, k) { s.classList.toggle('now', k === activeIdx); });
+  }
+
+  // Reduced motion: light the whole path, skip the scroll binding.
+  if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    steps.forEach(function (s) { s.classList.add('on'); });
+    fill.style.height = (centerOf(steps[steps.length - 1]) - RAIL_TOP) + 'px';
+    return;
+  }
+
+  var ticking = false;
+  function onScroll() {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(function () { update(); ticking = false; });
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  window.addEventListener('resize', onScroll, { passive: true });
+  update();
+})();
+</script>
+</body>
+</html>

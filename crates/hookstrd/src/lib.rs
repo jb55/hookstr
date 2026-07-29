@@ -6,7 +6,8 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::post,
+    response::Html,
+    routing::{get, post},
 };
 use futures_util::StreamExt;
 use nostrdb::{Filter, Ndb, SubscriptionStream};
@@ -30,11 +31,23 @@ pub struct Ingest {
     pub tokens: HashMap<String, String>,
 }
 
-/// The ingest router: `POST /ingest/{token}/{any/path}` -> durable 204.
+/// A static info page for humans who open the service in a browser. In
+/// production the reverse proxy sends websocket upgrades on `/` to the relay
+/// and plain GETs here (see SPIKE.md § Reverse proxy).
+const LANDING: &str = include_str!("landing.html");
+
+/// The ingest router: `GET /` -> landing page, `POST /ingest/{token}/{any/path}`
+/// -> durable 204.
 pub fn router(ingest: Ingest) -> Router {
     Router::new()
+        .route("/", get(landing))
         .route("/ingest/{token}/{*path}", post(receive))
         .with_state(ingest)
+}
+
+/// The browser landing page describing what hookstr is.
+async fn landing() -> Html<&'static str> {
+    Html(LANDING)
 }
 
 /// Accept, persist durably, 204. 500 only when persistence itself failed,
