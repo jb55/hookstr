@@ -1,0 +1,64 @@
+# Publish the hookstrd landing page to GitHub Pages.
+#
+# The page lives at crates/hookstrd/src/landing.html and is embedded in the
+# hookstrd binary with include_str!, so that file stays the single source of
+# truth — this workflow just copies it to index.html rather than keeping a
+# second copy in the tree that could drift.
+#
+# Elements marked `instance-only` (the "relay online" badge, the "point your
+# client at wss://<this host>" note) are true when a real hookstrd serves the
+# page and false on a static docs site, so they get hidden here.
+name: pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - crates/hookstrd/src/landing.html
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two Pages deploys race; keep the newest.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble site
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          cp crates/hookstrd/src/landing.html _site/index.html
+          # No Jekyll processing; the page is already final HTML.
+          touch _site/.nojekyll
+          # Hide the bits that only make sense when hookstrd itself is serving.
+          # Injected as CSS before </head> so no HTML rewriting is needed.
+          python3 - <<'EOF'
+          from pathlib import Path
+          p = Path('_site/index.html')
+          html = p.read_text()
+          marker = '</head>'
+          css = '<style>.instance-only{display:none !important}</style>\n'
+          assert marker in html, 'landing.html has no </head>'
+          p.write_text(html.replace(marker, css + marker, 1))
+          EOF
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
