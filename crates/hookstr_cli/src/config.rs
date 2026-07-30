@@ -20,10 +20,13 @@ pub struct DrainConfig {
     pub redb_path: String,
     /// File containing the drain nsec (its pubkey is hookstrd's allowlist).
     pub nsec_path: String,
-    /// Default replay routing. The event's `path` tag mirrors everything
-    /// after the token in the ingest URL, so deliveries are self-describing:
-    /// they replay to `{target_base}/{path}` with no per-path config as long
-    /// as the consumer's route mirrors the ingest path too.
+    /// Default replay base for this run, from `--target` (not the config
+    /// file — where a drain delivers is specific to the consumer it feeds,
+    /// not to the durable sync relationship the config describes). The
+    /// event's `path` tag mirrors everything after the token in the ingest
+    /// URL, so a delivery replays to `{target_base}/{path}` with no per-path
+    /// config as long as the consumer's route mirrors the ingest path.
+    #[serde(skip)]
     pub target_base: Option<String>,
     /// Per-path overrides for consumers whose route does not mirror the
     /// ingest path, e.g. "acme/events" = "http://localhost:3000/hooks".
@@ -56,7 +59,7 @@ impl DrainConfig {
     pub fn seckey(&self) -> anyhow::Result<[u8; 32]> {
         let nsec = std::fs::read_to_string(&self.nsec_path)
             .with_context(|| format!("reading nsec from {}", self.nsec_path))?;
-        let (seckey, _pubkey) = nostr_relay_sync::parse_nsec(nsec.trim())
+        let (seckey, _pubkey) = nostrdb_net::relay::sync::parse_nsec(nsec.trim())
             .map_err(|e| anyhow::anyhow!("{}: {e}", self.nsec_path))?;
         Ok(seckey)
     }

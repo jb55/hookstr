@@ -8,12 +8,16 @@ db_path = "/var/lib/hookstr-cli/ndb"
 redb_path = "/var/lib/hookstr-cli/replays.redb"
 nsec_path = "/var/lib/hookstr-cli/drain.nsec"
 
-# Deliveries are self-describing: the event's path tag mirrors everything
-# after the token in the ingest URL, so everything replays to
-# {target_base}/{path} when the consumer's route mirrors the ingest path.
-target_base = "http://localhost:3000/webhooks"
+# Where deliveries replay is a per-run flag, not config, since it's specific to
+# whichever consumer this drain feeds:
+#   hookstr drain --target http://localhost:3000/webhooks
+# Deliveries are self-describing: the event's path tag mirrors everything after
+# the token in the ingest URL, so a delivery ingested at
+# /ingest/<token>/acme/events replays to {--target}/acme/events.
 
 # Optional per-path overrides for consumers whose route doesn't mirror the
-# ingest path (e.g. a second app on another port).
+# ingest path (e.g. a second app on another port). These win over --target.
+# (A drain with neither --target nor a [targets] entry has nowhere to deliver
+# and refuses to start.)
 #[targets]
 #"acme/events" = "http://localhost:4000/hooks"

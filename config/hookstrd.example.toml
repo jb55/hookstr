@@ -1,8 +1,16 @@
 # hookstrd runs on the always-online box behind Caddy (see SPIKE.md § Reverse proxy).
 db_path = "/var/lib/hookstr/ndb"
 mapsize = 34359738368 # 32 GiB; store-everything, so be generous
-ingest_addr = "127.0.0.1:8080"
-relay_addr = "127.0.0.1:8081"
+# One port serves both the webhook ingest HTTP API and the nostr relay (ws);
+# hookstrd tells them apart by the Upgrade header, so the reverse proxy just
+# forwards everything here. This is the recommended default.
+listen_addr = "127.0.0.1:8080"
+#
+# Advanced: bind ingest and the relay on separate listeners instead (drop
+# listen_addr above and set BOTH of these). Lets the relay live on a private
+# interface — e.g. a WireGuard address — while only ingest faces the proxy:
+#ingest_addr = "127.0.0.1:8080"
+#relay_addr  = "10.0.0.1:8081"
 nsec_path = "/var/lib/hookstr/server.nsec"
 # NIP-42 allowlist: the drain client's pubkey (hex)
 drain_pubkey = "CHANGE-ME"

@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
 use hookstr_core::WebhookRecord;
 use nostrdb::{Config, Filter, Ndb, SubscriptionStream, Transaction};
+use nostrdb_net::relay::sync;
 use serde_json::json;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -29,7 +30,7 @@ mod replay_state;
 use config::DrainConfig;
 use replay_state::ReplayState;
 
-/// Drain page size; matches nostrdb_relay's per-REQ stored-replay cap.
+/// Drain page size; matches the relay's per-REQ stored-replay cap.
 const PAGE: usize = 500;
 /// Cap on the local replay query. Far above any realistic backlog; if it is
 /// ever hit, the next run picks up the rest.
@@ -74,9 +75,11 @@ enum Command {
         /// Exit after catch-up + replay instead of following.
         #[arg(long)]
         once: bool,
-        /// Replay target base URL for this run — deliveries POST to
-        /// {target}/{path} — overriding the config's target_base (explicit
-        /// [targets] path overrides still win).
+        /// Replay target base URL — deliveries POST to {target}/{path}. This
+        /// is where the drain delivers, which is specific to the consumer it
+        /// feeds, so it lives here rather than in the config. Explicit
+        /// [targets] path overrides in the config still win; leave unset to
+        /// route purely via those.
         #[arg(long)]
         target: Option<String>,
         /// Providers to drain, matched on each event's indexed `t` tag (the
@@ -122,9 +125,13 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let mut cfg = DrainConfig::load(config.as_deref())?;
             cfg.providers = providers;
-            if target.is_some() {
-                cfg.target_base = target;
-            }
+            cfg.target_base = target;
+            // Nowhere to deliver = nothing to do. A bare --target or any
+            // [targets] entry is enough; only the empty-both case is an error.
+            anyhow::ensure!(
+                cfg.target_base.is_some() || !cfg.targets.is_empty(),
+                "no replay target: pass --target <url>, or add a [targets] entry to the config"
+            );
             drain(cfg, !once).await
         }
         Command::Init { relay_url, config } => init(relay_url, config),
@@ -169,10 +176,10 @@ fn init(relay_url: Option<String>, config: Option<String>) -> anyhow::Result<()>
     let nsec_path = cfg_dir.join("drain.nsec");
     let pubkey = if nsec_path.exists() {
         let nsec = std::fs::read_to_string(&nsec_path)?;
-        let (_seckey, pubkey) = nostr_relay_sync::parse_nsec(nsec.trim())
+        let (_seckey, pubkey) = sync::parse_nsec(nsec.trim())
             .map_err(|e| anyhow::anyhow!("{}: {e}", nsec_path.display()))?;
         println!("keeping existing keypair {}", nsec_path.display());
-        hex::encode(pubkey)
+        pubkey.hex()
     } else {
         let (nsec, pubkey) = generate_keypair()?;
         use std::io::Write;
@@ -201,9 +208,16 @@ db_path = "{db}"
 redb_path = "{redb}"
 nsec_path = "{nsec}"
 
-# Deliveries are self-describing: a delivery ingested at
-# /ingest/<token>/acme/events replays to {{target_base}}/acme/events.
-target_base = "http://localhost:3000/webhooks"
+# Where deliveries replay is a per-run flag, not config, since it's specific
+# to whichever consumer this drain feeds:
+#   hookstr drain --target http://localhost:3000/webhooks
+# Deliveries are self-describing, so a delivery ingested at
+# /ingest/<token>/acme/events then replays to {{target}}/acme/events.
+#
+# Optional: pin specific paths to other consumers (these win over --target).
+# (A drain with neither --target nor a [targets] entry refuses to start.)
+#[targets]
+#"acme/events" = "http://localhost:4000/hooks"
 "#,
             db = data_dir.join("ndb").display(),
             redb = data_dir.join("replays.redb").display(),
@@ -214,7 +228,9 @@ target_base = "http://localhost:3000/webhooks"
     println!();
     println!("pubkey: {pubkey}");
     println!("        ^ add this to hookstrd's drain_pubkey allowlist");
-    println!("edit the config's relay_url / target_base, then run `hookstr drain`");
+    println!(
+        "set the config's relay_url, then: hookstr drain --target http://localhost:3000/webhooks"
+    );
     Ok(())
 }
 
@@ -250,7 +266,7 @@ async fn connect_and_drain(
     http: &reqwest::Client,
     follow: bool,
 ) -> anyhow::Result<()> {
-    let mut relay = nostr_relay_sync::Relay::connect(&cfg.relay_url)
+    let mut relay = sync::Relay::connect(&cfg.relay_url)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     relay
@@ -323,15 +339,10 @@ async fn connect_and_drain(
 /// O(difference) on the wire — then fetch the missing events by id.
 /// Pull-only: `Diff::have` is ignored (hookstrd's db is the source of truth;
 /// nothing pushes into it from here).
-async fn catch_up(
-    providers: &[String],
-    relay: &mut nostr_relay_sync::Relay,
-    ndb: &Ndb,
-) -> anyhow::Result<()> {
+async fn catch_up(providers: &[String], relay: &mut sync::Relay, ndb: &Ndb) -> anyhow::Result<()> {
     let filter = webhook_filter(providers);
     let wire = filter.json().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let storage =
-        nostr_relay_sync::local_set(ndb, &filter).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let storage = sync::local_set(ndb, &filter).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let diff = relay
         .reconcile(&wire, storage)
@@ -342,11 +353,13 @@ async fn catch_up(
     // stored-replay cap.
     for chunk in diff.need.chunks(PAGE) {
         let ids: Vec<String> = chunk.iter().map(hex::encode).collect();
-        let received = relay
+        // sync_into subscribes before the REQ and waits until the fetched ids
+        // are durably queryable in ndb before returning, so there's nothing more
+        // to await here.
+        relay
             .sync_into(ndb, &json!({ "ids": ids }).to_string())
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        nostr_relay_sync::await_ingest(ndb, &received).await;
     }
     if !diff.need.is_empty() {
         tracing::info!("reconciled {} missing webhook event(s)", diff.need.len());
@@ -431,7 +444,11 @@ async fn replay_event(
         }
         Err(err) => {
             state.mark_failed(id, now_s())?;
-            tracing::warn!(path = rec.path, id = hex::encode(id), "replay failed: {err:#}");
+            tracing::warn!(
+                path = rec.path,
+                id = hex::encode(id),
+                "replay failed: {err:#}"
+            );
             Ok(Outcome::Failed)
         }
     }
@@ -445,7 +462,11 @@ async fn replay(http: &reqwest::Client, target: &str, rec: &WebhookRecord) -> an
         req = req.header(name, value);
     }
     let resp = req.body(rec.body.clone()).send().await?;
-    anyhow::ensure!(resp.status().is_success(), "target answered {}", resp.status());
+    anyhow::ensure!(
+        resp.status().is_success(),
+        "target answered {}",
+        resp.status()
+    );
     Ok(())
 }
 

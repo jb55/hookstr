@@ -81,8 +81,7 @@ Write the nsec to a file, then configure `hookstrd.toml` (see
 ```toml
 db_path = "/var/lib/hookstr/ndb"
 mapsize = 34359738368            # 32 GiB; store-everything, so be generous
-ingest_addr = "127.0.0.1:8080"
-relay_addr = "127.0.0.1:8081"
+listen_addr = "127.0.0.1:8080"  # one port: webhook ingest + relay ws
 nsec_path = "/var/lib/hookstr/server.nsec"
 drain_pubkey = "<drain client pubkey, hex>"
 
@@ -93,18 +92,20 @@ acme = "long-random-secret"
 stripe = "another-long-random-secret"
 ```
 
-Run it behind any TLS-terminating proxy; Caddy sketch:
+Run it behind any TLS-terminating proxy. hookstrd serves ingest and the relay
+on one port and demuxes them itself, so the proxy just forwards everything —
+no header routing for websocket upgrades. Caddy sketch:
 
 ```caddyfile
 hooks.example.com {
-        handle /ingest/* {
-                reverse_proxy localhost:8080
-        }
-        handle {
-                reverse_proxy localhost:8081   # ws upgrade passes through
-        }
+        reverse_proxy localhost:8080
 }
 ```
+
+Advanced: set `ingest_addr` + `relay_addr` instead of `listen_addr` to bind
+ingest and the relay on separate listeners — e.g. the relay on a private
+WireGuard interface, off the public internet, with only ingest fronted by
+the proxy (a two-`handle` config). Set one form or the other, not both.
 
 ```
 $ hookstrd --config hookstrd.toml
@@ -135,27 +136,31 @@ pubkey: 9b3d462694fc29e57ff202a8e8f4caa68c668e5034ac1c00c7c21dadf92a2aa0
         ^ add this to hookstrd's drain_pubkey allowlist
 ```
 
-Then edit the config's `target_base` — deliveries are self-describing
-(the event's `path` tag mirrors everything after the token in the ingest
-URL), so a delivery ingested at `/ingest/<token>/acme/events` replays to
-`{target_base}/acme/events`. A `[targets]` table holds per-path overrides
-for consumers whose routes don't mirror the ingest path; see
+You point the drain at your local consumer with `--target` (below), not
+the config — where a drain delivers is specific to the consumer it feeds,
+not to the durable sync relationship the config describes. Deliveries are
+self-describing (the event's `path` tag mirrors everything after the token
+in the ingest URL), so a delivery ingested at `/ingest/<token>/acme/events`
+replays to `{target}/acme/events`. A `[targets]` table in the config holds
+per-path overrides for consumers whose routes don't mirror the ingest path
+(these win over `--target`); see
 [config/hookstr.example.toml](config/hookstr.example.toml) for every
-option.
+option. A drain with neither `--target` nor a `[targets]` entry has nowhere
+to deliver and refuses to start.
 
 Then drain:
 
 ```
-$ hookstr drain
+$ hookstr drain --target http://localhost:3000/webhooks
 ```
 
 This connects, AUTHs, negentropy-syncs the missed backlog, replays it
 oldest-first, and then follows — each new webhook replays in under a
 second while the connection is up. Pass `--once` to exit after the
 catch-up replay instead (cron-style). Positional args scope the drain
-to specific providers (`hookstr drain acme stripe`; empty = all), and
-`--target` overrides the config's `target_base` for the run — so one
-config serves several consumers, each running its own scoped drain:
+to specific providers (`hookstr drain --target … acme stripe`; empty =
+all) — so one hookstrd serves several consumers, each running its own
+scoped drain with its own `--target`:
 
 ```
 $ hookstr drain --target http://localhost:3003 acme

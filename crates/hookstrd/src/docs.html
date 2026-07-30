@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hookstr docs — set up hookstrd and the drain CLI</title>
+<meta name="description" content="Detailed setup docs for hookstr: standing up the hookstrd daemon behind a TLS proxy, registering providers, and running the hookstr drain CLI on the consumer.">
+<style>
+  :root {
+    --bg: #0d0f12;
+    --panel: #14171c;
+    --border: #262b33;
+    --fg: #e6e9ef;
+    --muted: #8a93a3;
+    --accent: #7c5cff;
+    --accent-dim: #3a2f6b;
+    --green: #4ade80;
+    --http: #7fd1ff;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.65 var(--mono);
+    -webkit-font-smoothing: antialiased;
+    padding: 0 20px;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 40px 0 96px; }
+
+  /* ── top nav ─────────────────────────────────────────── */
+  nav.top {
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    padding-bottom: 20px; margin-bottom: 28px; border-bottom: 1px solid var(--border);
+  }
+  nav.top .brand { font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
+  nav.top .brand .prompt { color: var(--accent); }
+  nav.top .sep { flex: 1 1 auto; }
+  nav.top a { color: var(--muted); font-size: 13px; }
+  nav.top a.here { color: var(--fg); }
+
+  h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.5px; font-weight: 700; }
+  .lede { color: var(--muted); font-size: 15px; margin: 0 0 12px; }
+  .lede a { color: var(--accent); }
+
+  /* ── in-page contents ────────────────────────────────── */
+  .toc {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; margin: 24px 0 8px;
+  }
+  .toc .lbl {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px;
+    color: var(--muted); margin-bottom: 10px;
+  }
+  .toc ol { margin: 0; padding-left: 20px; columns: 2; column-gap: 32px; }
+  @media (max-width: 560px) { .toc ol { columns: 1; } }
+  .toc li { margin: 3px 0; font-size: 13.5px; break-inside: avoid; }
+  .toc a { color: var(--fg); }
+
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 1.5px;
+    color: var(--accent); margin: 52px 0 4px; font-weight: 600;
+  }
+  h2 .n { color: var(--muted); margin-right: 8px; }
+  h2 + .sub { color: var(--muted); font-size: 14px; margin: 0 0 18px; }
+  h3 {
+    font-size: 15px; margin: 30px 0 8px; font-weight: 700;
+    scroll-margin-top: 20px;
+  }
+  h3 code { color: var(--accent); background: none; padding: 0; }
+
+  p { margin: 12px 0; }
+  p, li { color: var(--muted); }
+  p code, li code, td code, .callout code {
+    color: var(--fg); background: #1b1f26; border: 1px solid var(--border);
+    border-radius: 4px; padding: 0.5px 5px; font-size: 12.5px;
+  }
+  strong { color: var(--fg); font-weight: 600; }
+
+  ul, ol.steps { padding-left: 22px; }
+  li { margin: 6px 0; font-size: 14px; }
+
+  /* ── code blocks ─────────────────────────────────────── */
+  pre {
+    background: #0a0c0f; border: 1px solid var(--border); border-radius: 10px;
+    padding: 15px 16px; overflow-x: auto; margin: 14px 0; font-size: 13px;
+    line-height: 1.6;
+  }
+  pre code { color: var(--fg); background: none; border: 0; padding: 0; }
+  pre .c { color: var(--muted); }          /* comment */
+  pre .p { color: var(--accent); }         /* shell prompt / key */
+  pre .s { color: var(--green); }          /* string / value */
+  pre .o { color: var(--http); }           /* emphasis / output */
+  .caption {
+    font-size: 11.5px; color: var(--muted); margin: -6px 0 20px; padding-left: 2px;
+  }
+
+  /* ── callouts ────────────────────────────────────────── */
+  .callout {
+    border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    background: var(--panel); border-radius: 8px; padding: 12px 15px;
+    margin: 16px 0; font-size: 13.5px; color: var(--muted);
+  }
+  .callout.warn { border-left-color: #e0a54b; }
+  .callout b { color: var(--fg); }
+
+  /* ── tables ──────────────────────────────────────────── */
+  .tbl { overflow-x: auto; margin: 16px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td {
+    text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th {
+    color: var(--muted); font-weight: 600; text-transform: uppercase;
+    font-size: 10.5px; letter-spacing: 0.6px; border-bottom-color: #333a45;
+  }
+  td { color: var(--muted); }
+  td:first-child { white-space: nowrap; }
+  td code { color: var(--fg); }
+  td .req { color: var(--green); font-size: 11px; }
+  td .opt { color: var(--muted); font-size: 11px; }
+
+  footer {
+    margin-top: 64px; padding-top: 22px; border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 13px; display: flex; gap: 20px; flex-wrap: wrap;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav class="top">
+    <span class="brand"><span class="prompt">$</span> hookstr</span>
+    <a href="./">overview</a>
+    <a href="docs.html" class="here">docs</a>
+    <span class="sep"></span>
+    <a href="https://github.com/jb55/hookstr">github ↗</a>
+  </nav>
+
+  <h1>Setup &amp; usage</h1>
+  <p class="lede">
+    Standing up the <code>hookstrd</code> daemon on always-online infra, and running the
+    <code>hookstr</code> drain on the consumer. For the animated walk-through of a single
+    delivery's lifetime, see the <a href="./">overview</a>.
+  </p>
+
+  <div class="toc">
+    <div class="lbl">On this page</div>
+    <ol>
+      <li><a href="#concepts">Concepts &amp; roles</a></li>
+      <li><a href="#build">Build the binaries</a></li>
+      <li><a href="#server">Server: hookstrd</a></li>
+      <li><a href="#proxy">Reverse proxy &amp; TLS</a></li>
+      <li><a href="#providers">Registering providers</a></li>
+      <li><a href="#client">Client: the drain CLI</a></li>
+      <li><a href="#routing">Replay routing</a></li>
+      <li><a href="#cli-ref">CLI reference</a></li>
+      <li><a href="#config-ref">Config reference</a></li>
+      <li><a href="#ops">Operations</a></li>
+    </ol>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2 id="concepts"><span class="n">01</span>Concepts &amp; roles</h2>
+  <p class="sub">Two binaries, one immutable event per delivery.</p>
+
+  <p>
+    hookstr splits webhook <em>delivery</em> from webhook <em>consumption</em> so a flaky consumer
+    never makes a provider give up. There are two halves:
+  </p>
+  <div class="tbl"><table>
+    <tr><th>Binary</th><th>Runs where</th><th>Does what</th></tr>
+    <tr>
+      <td><code>hookstrd</code></td>
+      <td>always-online box (VPS), behind a TLS proxy</td>
+      <td>Accepts webhook POSTs, persists each as a signed <code>kind:3003</code> nostr event in
+        nostrdb, and serves them back over an authenticated, read-only relay.</td>
+    </tr>
+    <tr>
+      <td><code>hookstr</code></td>
+      <td>the consumer's machine (laptop, box behind a tunnel)</td>
+      <td>The drain: syncs down everything it missed, replays each delivery as a byte-exact local
+        HTTP request, then follows in realtime.</td>
+    </tr>
+  </table></div>
+
+  <p>Each delivery becomes one <strong>immutable, signed event</strong>: the raw body as content
+    (base64 + an <code>encoding</code> tag when it isn't UTF-8), the ingest path in a <code>path</code>
+    tag for replay routing, the provider name in an indexed <code>t</code> tag, and one
+    <code>header</code> tag per preserved header. Nothing is ever deleted — the store is the source of
+    truth, and negentropy (<a href="https://github.com/nostr-protocol/nips/blob/master/77.md">NIP-77</a>)
+    reconciles over the full set, which is what makes "catch up after being offline for a week" a
+    non-event.</p>
+
+  <div class="callout">
+    <b>Two keypairs.</b> The <b>server</b> has its own keypair; it signs every webhook event. The
+    <b>drain</b> has its own keypair; its pubkey goes on the server's
+    <a href="https://github.com/nostr-protocol/nips/blob/master/42.md">NIP-42</a> allowlist so only it
+    can read. You generate the drain key first (<code>hookstr init</code>), because the server config
+    needs its pubkey.
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2 id="build"><span class="n">02</span>Build the binaries</h2>
+  <p class="sub">One Rust workspace; two binaries fall out of it.</p>
+
+  <pre><code><span class="p">$</span> git clone https://github.com/jb55/hookstr
+<span class="p">$</span> cd hookstr
+<span class="p">$</span> cargo build --release
+<span class="c"># → target/release/hookstrd   (the daemon)</span>
+<span class="c"># → target/release/hookstr    (the drain CLI)</span></code></pre>
+
+  <p>Copy <code>hookstrd</code> to the server and <code>hookstr</code> to the consumer. They share no
+    state and never talk except over the relay's websocket. <code>cargo test --workspace</code> runs
+    the full end-to-end suite (real daemon + real drain, in-process) with no external services.</p>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2 id="server"><span class="n">03</span>Server: hookstrd</h2>
+  <p class="sub">The always-online half. Do this on the VPS.</p>
+
+  <h3>1 — Generate the server keypair</h3>
+  <p><code>keygen</code> is on the CLI binary, but the key it prints can be used for either side. Make
+    one for the server and write the <code>nsec</code> to a file (config never holds the secret
+    inline — only a path to it):</p>
+  <pre><code><span class="p">$</span> hookstr keygen
+<span class="o">nsec:   nsec1qy2…</span>
+<span class="o">pubkey: 8f2a…</span>
+
+<span class="p">$</span> umask 077
+<span class="p">$</span> hookstr keygen | awk '/nsec/{print $2}' &gt; /var/lib/hookstr/server.nsec</code></pre>
+  <div class="caption">The server's pubkey doesn't need to go anywhere — the drain trusts events by signature, not by an allowlist.</div>
+
+  <h3>2 — Get the drain's pubkey</h3>
+  <p>You need the <em>drain's</em> pubkey for the allowlist. Either jump to
+    <a href="#client">§06</a> and run <code>hookstr init</code> on the consumer first, or generate one
+    now with <code>hookstr keygen</code> and hand its <code>nsec</code> to the consumer later. Keep the
+    hex <code>pubkey</code> handy.</p>
+
+  <h3>3 — Write <code>hookstrd.toml</code></h3>
+  <p>See <a href="#config-ref">§09</a> for the full table. By default one port serves both ingest
+    and the relay (<code>listen_addr</code>); the <a href="#separate">advanced</a> split is below.</p>
+  <pre><code><span class="p">db_path</span>      = <span class="s">"/var/lib/hookstr/ndb"</span>
+<span class="p">mapsize</span>      = <span class="s">34359738368</span>            <span class="c"># 32 GiB — store-everything, size it generously</span>
+<span class="p">listen_addr</span>  = <span class="s">"127.0.0.1:8080"</span>       <span class="c"># one port: webhook ingest + relay ws (proxy fronts this)</span>
+<span class="p">nsec_path</span>    = <span class="s">"/var/lib/hookstr/server.nsec"</span>
+<span class="p">drain_pubkey</span> = <span class="s">"9b3d462694fc29e5…"</span>     <span class="c"># the DRAIN's pubkey, hex — NIP-42 allowlist</span>
+
+<span class="c"># Per-provider ingest secrets. Keep this table LAST: a TOML table swallows</span>
+<span class="c"># every key beneath it. Each value must be unique — the token names its provider.</span>
+[<span class="p">ingest_tokens</span>]
+<span class="p">acme</span>   = <span class="s">"long-random-secret-1"</span>
+<span class="p">stripe</span> = <span class="s">"long-random-secret-2"</span></code></pre>
+
+  <h3>4 — Run it</h3>
+  <pre><code><span class="p">$</span> hookstrd --config /etc/hookstr/hookstrd.toml
+<span class="o">hookstrd listening on 127.0.0.1:8080 (webhook ingest + relay ws)</span></code></pre>
+  <p><code>--config</code> defaults to <code>hookstrd.toml</code> in the working directory. Set
+    <code>RUST_LOG=info</code> (or <code>debug</code>) for logs. A minimal systemd unit:</p>
+  <pre><code>[Service]
+<span class="p">ExecStart</span>=/usr/local/bin/hookstrd --config /etc/hookstr/hookstrd.toml
+<span class="p">Environment</span>=RUST_LOG=info
+<span class="p">Restart</span>=always
+<span class="p">User</span>=hookstr</code></pre>
+  <div class="callout warn">
+    <b>Bind to localhost.</b> The listener is plaintext and expects the reverse proxy to terminate
+    TLS. Don't expose <code>8080</code> to the internet directly.
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2 id="proxy"><span class="n">04</span>Reverse proxy &amp; TLS</h2>
+  <p class="sub">One port; hookstrd sorts ingest from relay itself.</p>
+
+  <p>hookstrd serves ingest and the relay on the one <code>listen_addr</code> and demuxes them by the
+    <code>Upgrade</code> header — a websocket upgrade goes to the relay, everything else
+    (<code>POST /ingest/*</code>, a browser <code>GET /</code>) to the ingest router. So the proxy just
+    terminates TLS and forwards everything; no header-routing of its own:</p>
+  <pre><code><span class="p">hooks.example.com</span> {
+        reverse_proxy localhost:8080
+}</code></pre>
+
+  <div class="callout" id="separate">
+    <b>Advanced — separate binds.</b> Set <code>ingest_addr</code> + <code>relay_addr</code> instead of
+    <code>listen_addr</code> to put the two on their own listeners. The relay can then bind a private
+    interface — e.g. a WireGuard address — and stay off the public internet entirely, while only
+    ingest faces the proxy. Set one form or the other, never both. This mode wants the classic
+    two-<code>handle</code> proxy split (<code>/ingest/*</code> → ingest, everything else → relay).
+  </div>
+
+  <div class="callout warn">
+    <b>nginx: raise the read timeout.</b> The drain holds an idle websocket open while following.
+    nginx's default <code>proxy_read_timeout</code> (60s) resets it every minute. The drain sends a
+    keepalive ping every 25s to survive that, but set <code>proxy_read_timeout 3600s;</code> and the
+    usual <code>Upgrade</code>/<code>Connection</code> headers on the relay <code>location</code>
+    anyway.
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2 id="providers"><span class="n">05</span>Registering providers</h2>
+  <p class="sub">One URL per provider; the token is the whole auth story.</p>
+
+  <p>For each provider, register a URL of the shape:</p>
+  <pre><code>https://hooks.example.com/ingest/<span class="p">&lt;token&gt;</span>/<span class="s">&lt;any/path/you/like&gt;</span></code></pre>
+  <p>e.g. register <code>…/ingest/long-random-secret-1/acme/events</code> with Acme. On the wire:</p>
+  <ul>
+    <li>The <strong>token</strong> alone authenticates the delivery <em>and</em> names its provider
+      (that's why token values must be unique). A wrong token is a <code>404</code>, indistinguishable
+      from a missing route — probing reveals neither which providers exist nor their paths.</li>
+    <li>Everything <strong>after the token</strong> is free-form. It's echoed into the event's
+      <code>path</code> tag and becomes the replay routing key (<a href="#routing">§07</a>).</li>
+    <li>A successful, durably-stored delivery gets a <code>204</code>. A <code>5xx</code> means the
+      store failed — the provider should retry. Any other webhook auth (an <code>x-signature</code>
+      HMAC) is preserved and re-validated by <em>your</em> consumer on replay; hookstrd doesn't check
+      it.</li>
+  </ul>
+  <div class="callout">
+    <b>Rotating a leaked URL:</b> change (or remove) that provider's line in <code>[ingest_tokens]</code>,
+    restart hookstrd, and re-register the new URL. The other providers are untouched.
+  </div>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2 id="client"><span class="n">06</span>Client: the drain CLI</h2>
+  <p class="sub">The consumer half. Do this on the machine that handles the webhooks.</p>
+
+  <h3>1 — <code>hookstr init</code></h3>
+  <p>First-run setup. It generates the drain keypair (written <code>0600</code> next to the config),
+    writes a starter config, and prints the pubkey for the server's allowlist. Pass the relay URL:</p>
+  <pre><code><span class="p">$</span> hookstr init wss://hooks.example.com
+<span class="o">wrote keypair /home/you/.config/hookstr/drain.nsec</span>
+<span class="o">wrote config /home/you/.config/hookstr/config.toml</span>
+
+<span class="o">pubkey: 9b3d462694fc29e57ff202a8e8f4caa68c668e5034ac1c00c7c21dadf92a2aa0</span>
+<span class="o">        ^ add this to hookstrd's drain_pubkey allowlist</span></code></pre>
+  <p>The config lands at <code>$XDG_CONFIG_HOME/hookstr/config.toml</code> (falling back to
+    <code>~/.config/hookstr/</code>); the local mirror db and replay state go under
+    <code>~/.local/share/hookstr/</code>. <code>init</code> refuses to overwrite an existing config,
+    and keeps an existing keypair if one is already there (it may already be on the allowlist).</p>
+
+  <h3>2 — Put the pubkey on the allowlist</h3>
+  <p>Copy that <code>pubkey</code> into the server's <code>drain_pubkey</code>
+    (<a href="#server">§03</a>) and restart hookstrd. Until then the relay refuses REQ/sync from this
+    key — a permanent refusal the drain won't retry.</p>
+
+  <h3>3 — Review the config</h3>
+  <p>The config holds the durable <strong>sync identity</strong> — relay, keys, local db.
+    <code>init</code> already filled it in. Nothing target-related lives here: <em>where</em> the
+    drain delivers is a per-run flag (next step), specific to the consumer it feeds rather than to
+    the sync relationship the config describes.</p>
+  <pre><code><span class="p">relay_url</span> = <span class="s">"wss://hooks.example.com"</span>
+<span class="p">db_path</span>   = <span class="s">"/home/you/.local/share/hookstr/ndb"</span>
+<span class="p">redb_path</span> = <span class="s">"/home/you/.local/share/hookstr/replays.redb"</span>
+<span class="p">nsec_path</span> = <span class="s">"/home/you/.config/hookstr/drain.nsec"</span></code></pre>
+
+  <h3>4 — <code>hookstr drain</code></h3>
+  <pre><code><span class="p">$</span> hookstr drain --target http://localhost:3000/webhooks
+<span class="o">reconciled 42 missing webhook event(s)</span>
+<span class="o">drain complete: 42 replayed, 0 failed, 0 with no target (42 stored total)</span>
+<span class="o">following: replaying new webhooks as they arrive</span></code></pre>
+  <p><code>--target</code> is where deliveries replay — a per-run flag, not config, since it's specific
+    to the consumer this drain feeds. That connects, AUTHs (NIP-42), negentropy-reconciles the
+    backlog, replays it oldest-first, and then <strong>follows</strong> — each new webhook replays in
+    under a second while connected, and a dropped connection redials with backoff. Useful additions
+    (each still takes <code>--target</code>):</p>
+  <div class="tbl"><table>
+    <tr><th>Add to the command</th><th>Effect</th></tr>
+    <tr><td><code>--once</code></td>
+      <td>Catch up + replay, then <strong>exit</strong> instead of following. Cron-style.</td></tr>
+    <tr><td><code>acme stripe</code> <span class="opt">(positional)</span></td>
+      <td>Scope to specific providers (matched on the indexed <code>t</code> tag). Empty = all — so
+        one hookstrd feeds several consumers, each a scoped drain with its own <code>--target</code>.</td></tr>
+    <tr><td><code>[targets]</code> <span class="opt">(in config)</span></td>
+      <td>Pin specific ingest paths to other consumers; these win over <code>--target</code>
+        (<a href="#routing">§07</a>).</td></tr>
+  </table></div>
+  <p>Replay state (attempt counts, backoff) is client-local in redb, keyed by event id. A target that's
+    down just means backoff and retry — the events are already durable on the server, so nothing is
+    lost. Replay is <strong>at-least-once</strong>: your handler must dedupe on the provider's
+    delivery-id header, which makes crash-mid-replay safe.</p>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2 id="routing"><span class="n">07</span>Replay routing</h2>
+  <p class="sub">From ingest path to local URL.</p>
+
+  <p>The event's <code>path</code> tag mirrors everything after the token in the ingest URL. By default
+    a delivery replays to <code>{--target}/{path}</code>:</p>
+  <pre><code><span class="c"># provider POSTs to:</span>
+https://hooks.example.com/ingest/&lt;token&gt;/<span class="s">acme/events</span>
+
+<span class="c"># with --target http://localhost:3000/webhooks, replays to:</span>
+http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
+  <p>When a consumer's route <em>doesn't</em> mirror the ingest path — a second app on another port, a
+    different route shape — add a <code>[targets]</code> table to the config keyed by the exact path.
+    An explicit override always wins over <code>--target</code>:</p>
+  <pre><code>[<span class="p">targets</span>]
+<span class="s">"acme/events"</span> = <span class="s">"http://localhost:4000/hooks"</span>   <span class="c"># this path only</span></code></pre>
+  <p>With <em>some</em> routing configured, a delivery whose path isn't covered — no <code>--target</code>
+    base and no matching override — is left <strong>unreplayed</strong> (counted as "no target") so a
+    later run or config change can pick it up; it's never dropped. But a drain started with
+    <strong>neither</strong> a <code>--target</code> nor any <code>[targets]</code> entry has nowhere to
+    deliver <em>anything</em>, so it errors out immediately rather than syncing a backlog it can't
+    route.</p>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2 id="cli-ref"><span class="n">08</span>CLI reference</h2>
+  <p class="sub"><code>hookstr &lt;command&gt;</code> — the drain binary.</p>
+
+  <div class="tbl"><table>
+    <tr><th>Command</th><th>Args / flags</th><th>What it does</th></tr>
+    <tr>
+      <td><code>init [relay_url]</code></td>
+      <td><code>--config &lt;path&gt;</code></td>
+      <td>First-run setup: generate the drain keypair, write a starter config, print the allowlist
+        pubkey. <code>relay_url</code> is optional (a placeholder is written if omitted).</td>
+    </tr>
+    <tr>
+      <td><code>drain [providers…]</code></td>
+      <td><code>--once</code>, <code>--target &lt;url&gt;</code>, <code>--config &lt;path&gt;</code></td>
+      <td>Sync, replay the backlog, then follow. <code>--target</code> sets the replay base
+        (deliveries POST to <code>{target}/{path}</code>); <code>--once</code> exits after catch-up;
+        positional providers scope by <code>t</code> tag.</td>
+    </tr>
+    <tr>
+      <td><code>keygen</code></td>
+      <td>—</td>
+      <td>Print a fresh <code>nsec</code> + hex <code>pubkey</code>. Usable for either side.</td>
+    </tr>
+  </table></div>
+  <p>Config defaults to <code>$XDG_CONFIG_HOME/hookstr/config.toml</code>. Both binaries log via
+    <code>tracing</code>; the drain defaults to <code>info</code>, and <code>RUST_LOG</code> overrides
+    either.</p>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2 id="config-ref"><span class="n">09</span>Config reference</h2>
+  <p class="sub">Every key in both TOML files. Paths are used verbatim — no <code>~</code> expansion.</p>
+
+  <h3>hookstrd.toml <span class="opt">(server)</span></h3>
+  <div class="tbl"><table>
+    <tr><th>Key</th><th></th><th>Meaning</th></tr>
+    <tr><td><code>db_path</code></td><td><span class="req">required</span></td>
+      <td>nostrdb directory. Created if missing.</td></tr>
+    <tr><td><code>mapsize</code></td><td><span class="req">required</span></td>
+      <td>LMDB map size in bytes — the ceiling on total stored bytes. Size it generously
+        (e.g. <code>34359738368</code> = 32 GiB); nothing is ever pruned.</td></tr>
+    <tr><td><code>listen_addr</code></td><td><span class="opt">one of</span></td>
+      <td>Combined mode (default): one plaintext listener for ingest + relay ws, e.g.
+        <code>127.0.0.1:8080</code>. Front with TLS. Set this <em>or</em> the pair below.</td></tr>
+    <tr><td><code>ingest_addr</code><br><code>relay_addr</code></td><td><span class="opt">one of</span></td>
+      <td>Separate mode (advanced): distinct listeners for ingest and the relay ws. Lets the relay
+        bind a private interface (e.g. WireGuard) off the public net. Set <em>both</em>, and not
+        <code>listen_addr</code>.</td></tr>
+    <tr><td><code>nsec_path</code></td><td><span class="req">required</span></td>
+      <td>Path to a file holding the server <code>nsec</code>. The key signs every webhook event.</td></tr>
+    <tr><td><code>drain_pubkey</code></td><td><span class="req">required</span></td>
+      <td>The drain's 64-char hex pubkey — the sole entry on the NIP-42 read allowlist.</td></tr>
+    <tr><td><code>[ingest_tokens]</code></td><td><span class="req">required</span></td>
+      <td>Table of <code>provider = "token"</code>. Values must be unique. Keep it last in the file.</td></tr>
+  </table></div>
+
+  <h3>config.toml <span class="opt">(drain)</span></h3>
+  <div class="tbl"><table>
+    <tr><th>Key</th><th></th><th>Meaning</th></tr>
+    <tr><td><code>relay_url</code></td><td><span class="req">required</span></td>
+      <td>hookstrd's relay endpoint, e.g. <code>wss://hooks.example.com</code>.</td></tr>
+    <tr><td><code>db_path</code></td><td><span class="req">required</span></td>
+      <td>Local mirror nostrdb — negentropy needs the full local set here.</td></tr>
+    <tr><td><code>redb_path</code></td><td><span class="req">required</span></td>
+      <td>Replay bookkeeping (event id → status / attempts / next retry).</td></tr>
+    <tr><td><code>nsec_path</code></td><td><span class="req">required</span></td>
+      <td>File holding the drain <code>nsec</code>; its pubkey is on the server's allowlist.</td></tr>
+    <tr><td><code>[targets]</code></td><td><span class="opt">optional</span></td>
+      <td>Per-path overrides, <code>"provider/path" = "http://…"</code>, for routes that don't mirror
+        the ingest path. Win over <code>--target</code>.</td></tr>
+  </table></div>
+  <p>The replay base (<code>--target</code>) and provider scope (positional args) are <em>not</em>
+    config keys — they're per-run flags on <code>drain</code>.</p>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <h2 id="ops"><span class="n">10</span>Operations</h2>
+  <p class="sub">What breaks, and what happens when it does.</p>
+
+  <div class="tbl"><table>
+    <tr><th>Failure</th><th>Outcome</th></tr>
+    <tr><td>ingest box down</td><td>Provider retries per its own schedule. This is the <em>only</em>
+      failure surface a provider ever sees.</td></tr>
+    <tr><td>nostrdb write fails</td><td>Ingest answers <code>5xx</code> → provider retries. A
+      <code>204</code> is only ever sent after a durable commit.</td></tr>
+    <tr><td>drain crashes mid-replay</td><td>At-least-once + your dedupe on the delivery id → safe.</td></tr>
+    <tr><td>duplicate provider deliveries</td><td>Distinct events; your consumer dedupes on the
+      delivery id.</td></tr>
+    <tr><td>replay target down</td><td>redb records the failure and backs off; events are already
+      durable, so the next drain retries.</td></tr>
+    <tr><td>unauthed / wrong-key ws client</td><td>NIP-42: no REQ or sync until AUTH from the
+      allowlisted pubkey. A wrong key is a permanent refusal.</td></tr>
+    <tr><td>ingest URL leaks</td><td>Rotate that provider's token, restart, re-register. Others
+      unaffected.</td></tr>
+  </table></div>
+
+  <p style="margin-top:28px">
+    Storage grows monotonically — nothing is deleted, by design. Webhook bodies are a few KB each, so
+    even a million deliveries is single-digit GB; watch <code>mapsize</code> headroom the way you'd
+    watch any append-only log. Full design rationale, including the reasoning behind each constraint,
+    is in <a href="https://github.com/jb55/hookstr/blob/master/SPIKE.md">SPIKE.md</a>.
+  </p>
+
+  <footer>
+    <a href="./">← overview</a>
+    <a href="https://github.com/jb55/hookstr">source on github ↗</a>
+    <a href="https://github.com/nostr-protocol/nips/blob/master/42.md">NIP-42 auth</a>
+    <a href="https://github.com/nostr-protocol/nips/blob/master/77.md">NIP-77 sync</a>
+  </footer>
+</div>
+</body>
+</html>

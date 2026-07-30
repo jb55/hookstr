@@ -13,24 +13,28 @@ edition = "2024"
 [workspace.dependencies]
 hookstr-core = { path = "crates/hookstr-core" }
 
-# MUST match the pin in nostrdb-relay / nostr-relay-sync (same URL + rev) so
-# types unify. That pin is kernelkind's fork because notedeck rides it: the
-# rev carries SendFilter + other commits not yet on damus-io master.
-nostrdb = { git = "https://github.com/kernelkind/nostrdb-rs", rev = "aca2f66e3579dee0c9245e4c66100dd12cd940d6" }
-
-# Extracted from notedeck as standalone repos so hookstr builds anywhere.
-nostrdb_relay = { git = "https://github.com/jb55/nostrdb-relay", rev = "28f9d854eb6abe48c79fcf2374d0dbcb8cd3abc5" }
-nostr_relay_sync = { git = "https://github.com/jb55/nostr-relay-sync", rev = "b18355eeb019d155911177a8ae61dac89f9f36ec" }
+# The relay (nostrdb_net::relay::server), drain sync (nostrdb_net::relay::sync)
+# and nostrdb itself all come from the one nostrdb-rs workspace, so nostrdb_net's
+# nostrdb and ours are the same package — no cross-repo pin-lockstep to keep in
+# sync. During dev these point at a local checkout of the `nostrdb_net` branch;
+# swap to a git rev before landing.
+# TODO(pin): nostrdb  = { git = "https://github.com/damus-io/nostrdb-rs", rev = "<rev>" }
+#            nostrdb_net = { git = "https://github.com/damus-io/nostrdb-rs", rev = "<rev>" }
+nostrdb = { path = "/home/jb55/dev/nostrdb-rs/nostrdb_rs" }
+nostrdb_net = { path = "/home/jb55/dev/nostrdb-rs/nostrdb_net" }
 
 # Keygen only. Same version nostr/notedeck pin so one copy builds.
 secp256k1 = { version = "0.30", features = ["rand", "std"] }
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "net", "sync"] }
 axum = { version = "0.8", features = ["macros"] }
-# Version must stay in lockstep with notedeck's pin (0.24) so feature
-# unification gives relay_sync's connect_async TLS support for wss:// —
-# see SPIKE.md "Gap: wss".
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+# hookstrd serves ws (relay) and plain HTTP (ingest) on one port: it owns the
+# accept loop, peeks each connection, and hands non-ws ones to the axum Router
+# over a single hyper connection. wss:// support for the drain client comes from
+# nostrdb_net's own tokio-tungstenite (rustls-tls-webpki-roots), so hookstr no
+# longer declares tokio-tungstenite itself.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 redb = "2"
 futures-util = "0.3"

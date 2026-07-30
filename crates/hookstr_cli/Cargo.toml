@@ -10,13 +10,9 @@ path = "src/main.rs"
 [dependencies]
 hookstr-core.workspace = true
 nostrdb.workspace = true
-nostr_relay_sync.workspace = true
+nostrdb_net.workspace = true
 secp256k1.workspace = true
 tokio.workspace = true
-# Same version as nostr_relay_sync's featureless pin; declaring the TLS
-# feature here is what gives its connect_async wss:// support via feature
-# unification. See SPIKE.md "Gap: wss".
-tokio-tungstenite.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 redb.workspace = true
@@ -36,7 +32,7 @@ tracing-subscriber.workspace = true
 # The e2e test runs the real hookstrd ingest router + relay in-process and
 # drives this crate's binary against them.
 hookstrd = { path = "../hookstrd" }
-nostrdb_relay.workspace = true
+nostrdb_net.workspace = true
 axum.workspace = true
 tempfile = "3"
 # The e2e drives the drain binary as a child process.

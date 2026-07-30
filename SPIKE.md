@@ -22,8 +22,11 @@ webhook, eventually, in order, with valid signatures.
 
 ```
  provider A ──POST──▶ reverse proxy (hooks.example.com, TLS)
- provider B ──POST──▶   ├── /ingest/{token}/*  ──▶ hookstrd axum ──▶ nostrdb
-                        └── /  (ws upgrade)    ──▶ hookstrd relay ◀── nostrdb
+ provider B ──POST──▶   │  forwards everything to one port
+                        ▼
+                     hookstrd (one listener, demuxes by Upgrade header)
+                        ├── /ingest/{token}/*  ──▶ axum ingest ──▶ nostrdb
+                        └── /  (ws upgrade)    ──▶ relay        ◀── nostrdb
                                                        ▲
                                  NIP-42 AUTH + NIP-77 sync + live REQ
                                                        │
@@ -85,7 +88,11 @@ server's keypair. Implemented and documented in
 
 ## hookstrd
 
-Two listeners behind the reverse proxy, one nostrdb:
+One listener behind the reverse proxy, one nostrdb. hookstrd owns the accept
+loop (`hookstrd::serve`): it peeks each connection (without consuming it) and
+hands a websocket upgrade to the relay and everything else to the axum ingest
+router. So the proxy just forwards to a single port — no `Upgrade`-header
+routing of its own.
 
 **Ingest (axum).** `POST /ingest/{token}/{provider}/{type}`. The `{token}`
 path segment is a long random secret baked into the URL registered with
@@ -165,9 +172,12 @@ unification gives its `connect_async` wss support.
 **Replay.** Reconstruct with `parse_webhook_note`, then POST with the
 preserved headers and byte-exact body. Deliveries are self-describing: the
 `path` tag mirrors the ingest URL's `{provider}/{type}` suffix, so a single
-`target_base` routes everything to `{target_base}/{provider}/{type}` when
-the consumer's route mirrors the ingest path; a `[targets]` map holds
-per-path overrides for consumers that don't. Success/attempt state is
+`--target` base routes everything to `{target}/{provider}/{type}` when the
+consumer's route mirrors the ingest path (it's a per-run flag, not config —
+where a drain delivers is specific to the consumer it feeds, not to the
+durable sync relationship the config describes); a `[targets]` map in the
+config holds per-path overrides for consumers that don't. Success/attempt
+state is
 **client-local** in redb (32-byte event id → attempts/next_retry) — never
 modeled as nostr events, which would pollute the sync set. Exponential
 backoff on failure (target down = consumer not running, normal).
@@ -188,28 +198,27 @@ generously at open and forget about it.
 
 ## Reverse proxy
 
-Any TLS-terminating proxy works; Caddy sketch:
+Any TLS-terminating proxy works. hookstrd serves ingest and the relay on one
+port and sorts the two out itself, so the proxy just forwards everything —
+no header matching to route websocket upgrades. Caddy sketch:
 
 ```caddyfile
 hooks.example.com {
-        # provider deliveries → axum ingest
-        handle /ingest/* {
-                reverse_proxy localhost:8080
-        }
-        # ws clients (the drain) → nostr relay
-        @ws header Connection *Upgrade*
-        handle @ws {
-                reverse_proxy localhost:8081
-        }
-        # everything else (browsers hitting `/`) → axum landing page
-        handle {
-                reverse_proxy localhost:8080
-        }
+        reverse_proxy localhost:8080
 }
 ```
 
-The relay only ever sees websocket upgrades; a plain browser GET to `/` falls
-through to axum, which serves a static info page (`GET /` in `hookstrd::router`).
+hookstrd (`hookstrd::serve`) peeks each connection and dispatches a websocket
+upgrade to the relay and everything else — provider `POST /ingest/*` and a
+browser `GET /` (the static landing page) — to the axum ingest router. Method
+alone can't tell them apart (a ws upgrade and a browser hit are both `GET /`),
+so it keys on the `Upgrade: websocket` header.
+
+This one-port combine is the default. Advanced deployments can instead set
+`ingest_addr` + `relay_addr` (in place of `listen_addr`) to bind the two on
+separate listeners — putting the relay on a private interface (e.g. WireGuard),
+off the public net, with only ingest behind the proxy. Config load requires
+exactly one of the two forms; `HookstrdConfig::listen` resolves it.
 
 TLS is the proxy's problem. hookstrd listens plaintext on localhost only.
 
@@ -301,6 +310,6 @@ Target routing for `hookstr_cli` — this consumer's webhook routes mirror
 the ingest path (`/{provider}/{type}`), so one base covers every provider,
 current and future, with zero per-provider config:
 
-```toml
-target_base = "http://localhost:3003/api/v1/webhook"
+```
+$ hookstr drain --target http://localhost:3003/api/v1/webhook
 ```
