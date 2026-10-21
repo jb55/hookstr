@@ -12,23 +12,25 @@ hookstr splits delivery from consumption:
 - **`hookstrd`** runs permanently on always-online infra behind a
   TLS-terminating reverse proxy. It accepts any webhook with a fast 2xx,
   persists it as a signed nostr event in [nostrdb], and serves those
-  events back over an authenticated ([NIP-42]) embedded nostr relay.
+  events back over an embedded nostr relay that listens on localhost
+  only. The drain reaches it through a tunnel.
 - **`hookstr drain`** runs wherever the consumer lives. It
   negentropy-syncs ([NIP-77]) whatever it missed while offline, replays
   each delivery as a real HTTP request — byte-exact body, preserved
   headers — against a configured local target, then keeps following:
-  new webhooks replay in realtime while it's connected, redialing with
-  backoff when the connection drops.
+  new webhooks replay in realtime while it's connected, reconnecting
+  and re-syncing on its own when the connection drops.
 
 Providers see one endpoint that never goes down. The consumer sees every
 webhook, eventually, in order, with valid signatures.
 
 ```
  provider A ──POST──▶ reverse proxy (hooks.example.com, TLS)
- provider B ──POST──▶   ├── /ingest/{token}/*  ──▶ hookstrd axum ──▶ nostrdb
-                        └── /  (ws upgrade)    ──▶ hookstrd relay ◀── nostrdb
+ provider B ──POST──▶   └── /ingest/{token}/*  ──▶ hookstrd axum ──▶ nostrdb
+                                                                       │
+                              127.0.0.1:8081  hookstrd relay ◀─────────┘
                                                        ▲
-                                 NIP-42 AUTH + NIP-77 sync + live REQ
+                          tunnel (ssh -L / Tailscale) + NIP-77 sync + live REQ
                                                        │
  dev machine:  hookstr cli ◀───────────────────────────┘
                     │ replay (HTTP, raw body + preserved headers)
@@ -50,11 +52,13 @@ webhook, eventually, in order, with valid signatures.
 - **Store everything.** No deletion, ever. Negentropy reconciles over the
   full set, which makes sync trivial — and webhook bodies are a few KB,
   so even a million deliveries is single-digit GB.
-- **Pull-only.** The relay is read-only (NIP-42-gated, `accept_events =
-  false`); hookstrd's DB is the source of truth and nothing pushes into
-  it over the wire. On the client, replay only acts on notes read back
-  out of the local nostrdb after its ingester has verified and committed
-  them — never on wire frames.
+- **Pull-only, trusting one key.** The relay has no auth and will store
+  any event a client sends it, so it binds to localhost and the drain
+  reaches it through a tunnel. The drain pins hookstrd's pubkey
+  (`server_pubkey`): it syncs and replays only events hookstrd signed, so
+  anything else pushed into the relay is never acted on. On the client,
+  replay only acts on notes read back out of the local nostrdb after its
+  ingester has verified and committed them — never on wire frames.
 
 Each inbound delivery is one immutable kind `3003` nostr event, signed by
 the server's key: the raw body as content (base64 + an `encoding` tag if
@@ -66,8 +70,8 @@ one `header` tag per preserved header. Schema lives in
 
 ### Server (the always-online box)
 
-Generate a keypair for the server, and get the drain client's pubkey
-(generated below) for the allowlist:
+Generate a keypair for the server. Its pubkey is what the drain pins as
+`server_pubkey`:
 
 ```
 $ hookstr keygen
@@ -81,9 +85,9 @@ Write the nsec to a file, then configure `hookstrd.toml` (see
 ```toml
 db_path = "/var/lib/hookstr/ndb"
 mapsize = 34359738368            # 32 GiB; store-everything, so be generous
-listen_addr = "127.0.0.1:8080"  # one port: webhook ingest + relay ws
+ingest_addr = "127.0.0.1:8080"  # webhook ingest, behind the proxy
+relay_addr = "127.0.0.1:8081"   # relay ws, localhost only (the default)
 nsec_path = "/var/lib/hookstr/server.nsec"
-drain_pubkey = "<drain client pubkey, hex>"
 
 # Per-provider ingest secrets; each token authenticates and names its
 # provider, and can be rotated/revoked without disturbing the others.
@@ -92,9 +96,9 @@ acme = "long-random-secret"
 stripe = "another-long-random-secret"
 ```
 
-Run it behind any TLS-terminating proxy. hookstrd serves ingest and the relay
-on one port and demuxes them itself, so the proxy just forwards everything —
-no header routing for websocket upgrades. Caddy sketch:
+Run ingest behind any TLS-terminating proxy. Only `ingest_addr` goes
+through it; never proxy `relay_addr`, since the relay has no auth. Caddy
+sketch:
 
 ```caddyfile
 hooks.example.com {
@@ -102,13 +106,16 @@ hooks.example.com {
 }
 ```
 
-Advanced: set `ingest_addr` + `relay_addr` instead of `listen_addr` to bind
-ingest and the relay on separate listeners — e.g. the relay on a private
-WireGuard interface, off the public internet, with only ingest fronted by
-the proxy (a two-`handle` config). Set one form or the other, not both.
+Instead of localhost plus a tunnel, `relay_addr` can bind a private
+interface, e.g. a WireGuard address, that only the drain machine can reach.
+The old combined `listen_addr` mode (ingest and relay on one port) is gone,
+since an unauthenticated relay can't share the public port. A config that
+still sets it fails at startup and says to rename it to `ingest_addr`.
 
 ```
 $ hookstrd --config hookstrd.toml
+INFO server pubkey 8f2a… (the drain's server_pubkey)
+INFO hookstrd ingest on 127.0.0.1:8080, relay on ws://127.0.0.1:8081
 ```
 
 Register `https://hooks.example.com/ingest/<token>/<any/path>` with each
@@ -121,19 +128,21 @@ replay.
 
 ### Client (the dev machine)
 
-`hookstr init` does the first-run setup: it generates the drain keypair
-(written 0600 next to the config), writes a starter
-`~/.config/hookstr/config.toml` with the local mirror db under
-`~/.local/share/hookstr/`, and prints the pubkey that goes in hookstrd's
-`drain_pubkey` allowlist:
+Open a tunnel to hookstrd's relay. Any tunnel works; with ssh:
 
 ```
-$ hookstr init wss://hooks.example.com
-wrote keypair /home/you/.config/hookstr/drain.nsec
-wrote config /home/you/.config/hookstr/config.toml
+$ ssh -NL 8081:127.0.0.1:8081 hooks.example.com
+```
 
-pubkey: 9b3d462694fc29e57ff202a8e8f4caa68c668e5034ac1c00c7c21dadf92a2aa0
-        ^ add this to hookstrd's drain_pubkey allowlist
+`hookstr init` writes a starter `~/.config/hookstr/config.toml`, with the
+local mirror db under `~/.local/share/hookstr/`. Give it the relay URL as
+the tunnel exposes it (default `ws://127.0.0.1:8081`) and hookstrd's
+pubkey:
+
+```
+$ hookstr init ws://127.0.0.1:8081 --server-pubkey 8f2a…
+wrote config /home/you/.config/hookstr/config.toml
+then: hookstr drain --target http://localhost:3000/webhooks
 ```
 
 You point the drain at your local consumer with `--target` (below), not
@@ -154,9 +163,10 @@ Then drain:
 $ hookstr drain --target http://localhost:3000/webhooks
 ```
 
-This connects, AUTHs, negentropy-syncs the missed backlog, replays it
-oldest-first, and then follows — each new webhook replays in under a
-second while the connection is up. Pass `--once` to exit after the
+This negentropy-syncs the missed backlog, replays it oldest-first, and
+then follows — each new webhook replays in under a second while the
+connection is up, and a dropped connection reconnects and re-syncs on
+its own. Pass `--once` to exit after the
 catch-up replay instead (cron-style). Positional args scope the drain
 to specific providers (`hookstr drain --target … acme stripe`; empty =
 all) — so one hookstrd serves several consumers, each running its own
@@ -200,16 +210,18 @@ backoff and retry; the events are already durable.
 | client crashes mid-replay | at-least-once + consumer dedupe → safe |
 | duplicate provider deliveries | distinct events; consumer dedupes on its delivery id |
 | replay target down | redb retry state + backoff; events are already durable |
-| unauthed ws client | NIP-42: no REQ/NEG until AUTH from an allowlisted pubkey |
+| someone reaches the relay | it has no auth: they can read every stored webhook. Keep `relay_addr` on localhost and behind a tunnel |
+| events pushed into the relay | stored, but never synced or replayed: the drain only acts on events signed by `server_pubkey` |
 | ingest URL leaks | rotate the path token, re-register with providers |
 
 ## Crates
 
-- [`hookstrd`](crates/hookstrd) — the daemon: axum ingest +
-  embedded [nostrdb-relay] (EVENT/REQ/CLOSE, live subscriptions, NIP-42,
+- [`hookstrd`](crates/hookstrd) — the daemon: axum ingest + the
+  embedded `nostrdb_net` relay (EVENT/REQ/CLOSE, live subscriptions,
   NIP-77 responder).
 - [`hookstr_cli`](crates/hookstr_cli) — drain client, built on
-  [nostr-relay-sync] (NIP-42 client, negentropy reconcile, live streaming).
+  `nostrdb_net`'s sync `Session` (negentropy backfill, live REQ,
+  reconnects).
 - [`hookstr-core`](crates/hookstr-core) — shared event schema:
   `WebhookRecord`, `sign_webhook_note`, `parse_webhook_note`.
 
@@ -217,13 +229,14 @@ backoff and retry; the events are already durable.
 [`crates/hookstr_cli/tests/e2e.rs`](crates/hookstr_cli/tests/e2e.rs)
 spins up the real hookstrd router + relay in-process and drives the real
 drain binary — byte-exact replay (including a binary/base64 body), redb
-dedupe across runs, realtime follow, and allowlist refusal.
+dedupe across runs, realtime follow, peek, and forged events never
+replaying.
+
+Both crates pin [nostrdb-rs]'s `sync-progress` branch by git rev.
 
 Full design doc, including the reasoning behind each constraint and open
 questions: [SPIKE.md](SPIKE.md).
 
 [nostrdb]: https://github.com/damus-io/nostrdb
-[nostrdb-relay]: https://github.com/jb55/nostrdb-relay
-[nostr-relay-sync]: https://github.com/jb55/nostr-relay-sync
-[NIP-42]: https://github.com/nostr-protocol/nips/blob/master/42.md
+[nostrdb-rs]: https://github.com/damus-io/nostrdb-rs
 [NIP-77]: https://github.com/nostr-protocol/nips/blob/master/77.md

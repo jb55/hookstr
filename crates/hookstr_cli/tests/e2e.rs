@@ -1,9 +1,9 @@
-//! End-to-end: the real hookstrd ingest router + NIP-42 relay run in-process,
-//! and the real `hookstr` binary drains against them — provider POST ->
-//! durable 204 -> authed negentropy drain -> byte-exact replay to a local
-//! target, plus redb dedupe, realtime follow, and allowlist refusal.
+//! End-to-end: the real hookstrd ingest router + relay run in-process, and the
+//! real `hookstr` binary drains against them — provider POST -> durable 204 ->
+//! negentropy drain -> byte-exact replay to a local target, plus redb dedupe,
+//! realtime follow, and forged events in the open relay never replaying.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use axum::{
@@ -17,17 +17,12 @@ use nostrdb::{Config, Ndb};
 use tokio::sync::mpsc;
 
 const SERVER_SECRET: [u8; 32] = [0x42; 32];
-const DRAIN_SECRET: [u8; 32] = [0x43; 32];
 const INTRUDER_SECRET: [u8; 32] = [0x99; 32];
 const TOKEN: &str = "test-ingest-token";
 
 /// One replayed delivery as the target saw it: `{provider}/{type}` route,
 /// headers, and the raw body.
 type Delivery = (String, HashMap<String, String>, Vec<u8>);
-
-fn nsec(secret: &[u8; 32]) -> String {
-    bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked("nsec"), secret).expect("bech32")
-}
 
 fn pubkey(secret: &[u8; 32]) -> [u8; 32] {
     secp256k1::SecretKey::from_slice(secret)
@@ -37,89 +32,46 @@ fn pubkey(secret: &[u8; 32]) -> [u8; 32] {
         .serialize()
 }
 
-/// How hookstrd binds ingest and the relay for a given `World`: combined is the
-/// production default, separate is the advanced (e.g. private-interface) path.
-#[derive(Clone, Copy)]
-enum Bind {
-    Combined,
-    Separate,
-}
-
-/// The whole deployment, minus the CLI: the real hookstrd server over one
-/// nostrdb, a capture target for replays, and the config file the drain binary
-/// will run with.
+/// The whole deployment, minus the CLI: the real hookstrd ingest server and
+/// relay over one nostrdb, a capture target for replays, and the config file
+/// the drain binary will run with.
 struct World {
     tmp: tempfile::TempDir,
-    /// The port the webhook ingest HTTP API is on (== the relay port in
-    /// combined mode; a distinct port in separate mode).
-    ingest_port: u16,
+    /// hookstrd's ingest HTTP port.
+    port: u16,
+    /// hookstrd's nostrdb, for injecting events straight into the relay's
+    /// store the way an outside client's `EVENT` would land.
+    ndb: Ndb,
+    /// Keeps the relay up for the test's lifetime.
+    _relay: nostrdb_net::relay::server::RelayHandle,
     deliveries: mpsc::UnboundedReceiver<Delivery>,
     cfg_path: std::path::PathBuf,
     /// The capture target's base URL, passed to the drain via `--target`.
     target_url: String,
-    /// Keeps the relay's own listener alive in separate mode (None in combined,
-    /// where the relay lives inside `hookstrd::serve`'s task).
-    _relay: Option<nostrdb_net::relay::server::RelayHandle>,
 }
 
 impl World {
-    /// `drain_secret` is what goes in the CLI's nsec file; the relay allowlist
-    /// is always the legitimate drain key, so passing another key exercises
-    /// the refusal path. Defaults to the combined single-port server.
-    async fn start(drain_secret: &[u8; 32]) -> World {
-        Self::start_with(drain_secret, Bind::Combined).await
-    }
-
-    /// Like [`start`](Self::start), but with ingest and the relay on separate
-    /// listeners — the advanced `ingest_addr` + `relay_addr` deployment.
-    async fn start_separate(drain_secret: &[u8; 32]) -> World {
-        Self::start_with(drain_secret, Bind::Separate).await
-    }
-
-    async fn start_with(drain_secret: &[u8; 32], bind: Bind) -> World {
+    async fn start() -> World {
         let tmp = tempfile::tempdir().expect("tempdir");
 
         let db_path = tmp.path().join("server-db");
         std::fs::create_dir_all(&db_path).expect("db dir");
         let ndb = Ndb::new(db_path.to_str().unwrap(), &Config::new()).expect("ndb");
 
+        // The real hookstrd: ingest (http) on one listener, the relay (ws) on
+        // its own, both over the one nostrdb, as `hookstrd` runs in production.
         let ingest = hookstrd::Ingest {
             ndb: ndb.clone(),
             seckey: SERVER_SECRET,
             tokens: HashMap::from([("acme".to_owned(), TOKEN.to_owned())]),
         };
-        let allowed = HashSet::from([pubkey(&DRAIN_SECRET)]);
-        // Wire the server exactly as `hookstrd` main does for each mode, and
-        // hand back the ingest port + the ws URL the drain should dial.
-        let (ingest_port, relay_url, relay) = match bind {
-            Bind::Combined => {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind");
-                let port = listener.local_addr().unwrap().port();
-                tokio::spawn(async move { hookstrd::serve(listener, ingest, allowed).await.unwrap() });
-                (port, format!("ws://127.0.0.1:{port}"), None)
-            }
-            Bind::Separate => {
-                let relay = nostrdb_net::relay::server::spawn_with_auth(
-                    ndb,
-                    "127.0.0.1:0".parse().unwrap(),
-                    nostrdb_net::relay::server::AuthConfig {
-                        allowed_pubkeys: allowed,
-                        accept_events: false,
-                    },
-                )
-                .expect("relay");
-                let relay_url = relay.url();
-                let app = hookstrd::router(ingest);
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind ingest");
-                let port = listener.local_addr().unwrap().port();
-                tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-                (port, relay_url, Some(relay))
-            }
-        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { hookstrd::serve(listener, ingest).await.unwrap() });
+        let relay =
+            hookstrd::spawn_relay(ndb.clone(), "127.0.0.1:0".parse().unwrap()).expect("relay");
 
         // The replay target: capture `{provider}/{type}` + headers + body and
         // answer 200, mirroring the ingest path shape under /hook.
@@ -133,38 +85,37 @@ impl World {
         let target_port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, target).await.unwrap() });
 
-        let nsec_path = tmp.path().join("drain.nsec");
-        std::fs::write(&nsec_path, format!("{}\n", nsec(drain_secret))).expect("nsec");
-
         let target_url = format!("http://127.0.0.1:{target_port}/hook");
         let cfg_path = tmp.path().join("hookstr.toml");
         std::fs::write(
             &cfg_path,
             format!(
-                r#"relay_url = "{relay_url}"
+                r#"relay_url = "{}"
+server_pubkey = "{}"
 db_path = "{}"
 redb_path = "{}"
-nsec_path = "{}"
 "#,
+                relay.url(),
+                hex::encode(pubkey(&SERVER_SECRET)),
                 tmp.path().join("cli-db").display(),
                 tmp.path().join("replay.redb").display(),
-                nsec_path.display(),
             ),
         )
         .expect("config");
 
         World {
             tmp,
-            ingest_port,
+            port,
+            ndb,
+            _relay: relay,
             deliveries,
             cfg_path,
             target_url,
-            _relay: relay,
         }
     }
 
     fn ingest_url(&self, token: &str, path: &str) -> String {
-        format!("http://127.0.0.1:{}/ingest/{token}/{path}", self.ingest_port)
+        format!("http://127.0.0.1:{}/ingest/{token}/{path}", self.port)
     }
 
     /// POST a webhook the way a provider would and return the status.
@@ -249,7 +200,7 @@ async fn capture(
 
 #[tokio::test]
 async fn drain_once_replays_ingested_webhooks_byte_exact() {
-    let mut world = World::start(&DRAIN_SECRET).await;
+    let mut world = World::start().await;
 
     // A wrong ingest token is indistinguishable from a missing route.
     let status = reqwest::Client::new()
@@ -340,7 +291,7 @@ async fn drain_once_replays_ingested_webhooks_byte_exact() {
 
 #[tokio::test]
 async fn follow_replays_new_webhooks_in_realtime() {
-    let mut world = World::start(&DRAIN_SECRET).await;
+    let mut world = World::start().await;
 
     // Backlog before the drain starts; its replay doubles as the readiness
     // signal that the follower is connected and past catch-up.
@@ -389,7 +340,7 @@ async fn follow_replays_new_webhooks_in_realtime() {
 
 #[tokio::test]
 async fn targets_override_wins_over_target_flag() {
-    let mut world = World::start(&DRAIN_SECRET).await;
+    let mut world = World::start().await;
 
     // Pin acme/events to the capture server via a [targets] override, then
     // point --target at a black hole: only the override can route this
@@ -435,33 +386,8 @@ async fn targets_override_wins_over_target_flag() {
 }
 
 #[tokio::test]
-async fn separate_listeners_replay_end_to_end() {
-    // The advanced deployment: relay and ingest on distinct listeners (so the
-    // relay can live on a private interface). Sync + replay must work exactly
-    // as in the combined single-port default.
-    let mut world = World::start_separate(&DRAIN_SECRET).await;
-
-    assert_eq!(
-        world
-            .ingest("acme/events", &[("x-webhook-id", "wh_s")], b"separate")
-            .await,
-        StatusCode::NO_CONTENT
-    );
-
-    let output = world.drain_once().await;
-    assert!(
-        output.status.success(),
-        "drain failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let (path, _, body) = world.next_delivery().await;
-    assert_eq!((path.as_str(), body.as_slice()), ("acme/events", &b"separate"[..]));
-}
-
-#[tokio::test]
 async fn drain_without_any_target_errors() {
-    let world = World::start(&DRAIN_SECRET).await;
+    let world = World::start().await;
 
     // No --target and no [targets] in the config: there is nowhere to deliver,
     // so the drain must refuse to start (before it even connects) rather than
@@ -483,84 +409,95 @@ async fn drain_without_any_target_errors() {
 }
 
 #[tokio::test]
-async fn init_writes_keypair_and_config_once() {
+async fn init_writes_config_once() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let init = |relay: &'static str| {
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_hookstr"));
-        cmd.args(["init", relay])
+        cmd.args(["init", relay, "--server-pubkey", "ab".repeat(32).as_str()])
             .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
             .env("XDG_DATA_HOME", tmp.path().join("data"));
         async move { cmd.output().await.expect("init runs") }
     };
 
-    let out = init("wss://first.example").await;
+    let out = init("ws://127.0.0.1:9999").await;
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let pubkey = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("pubkey: "))
-        .expect("init prints the allowlist pubkey")
-        .to_owned();
-
     let cfg_path = tmp.path().join("cfg/hookstr/config.toml");
     let cfg = std::fs::read_to_string(&cfg_path).expect("config written");
     assert!(
-        cfg.contains(r#"relay_url = "wss://first.example""#),
+        cfg.contains(r#"relay_url = "ws://127.0.0.1:9999""#),
         "{cfg}"
     );
-    let nsec_path = tmp.path().join("cfg/hookstr/drain.nsec");
-    let nsec = std::fs::read_to_string(&nsec_path).expect("nsec written");
-    let (_, pk) = nostrdb_net::relay::sync::parse_nsec(nsec.trim()).expect("valid nsec");
-    assert_eq!(pk.hex(), pubkey, "printed pubkey matches the keypair");
+    assert!(
+        cfg.contains(&format!(r#"server_pubkey = "{}""#, "ab".repeat(32))),
+        "{cfg}"
+    );
 
-    // A second init must not clobber the config...
-    let out = init("wss://second.example").await;
+    // A second init must not clobber the config.
+    let out = init("ws://127.0.0.1:1111").await;
     assert!(!out.status.success(), "re-init must refuse");
-    assert!(
-        std::fs::read_to_string(&cfg_path)
-            .unwrap()
-            .contains("first.example")
-    );
-
-    // ...and after deleting it, the existing keypair is kept (it may already
-    // be on hookstrd's allowlist).
-    std::fs::remove_file(&cfg_path).unwrap();
-    let out = init("wss://second.example").await;
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(
-        std::fs::read_to_string(&nsec_path).unwrap(),
-        nsec,
-        "re-init keeps the existing keypair"
-    );
+    assert!(std::fs::read_to_string(&cfg_path).unwrap().contains("9999"));
 }
 
 #[tokio::test]
-async fn drain_with_a_key_off_the_allowlist_is_refused() {
-    let world = World::start(&INTRUDER_SECRET).await;
+async fn forged_events_in_the_open_relay_never_replay() {
+    let mut world = World::start().await;
+
+    // The relay has no auth and ingests any EVENT, so an outsider can plant a
+    // well-formed webhook event signed with their own key. Land one straight
+    // in hookstrd's store, exactly where such an EVENT ends up.
+    let forged = hookstr_core::WebhookRecord {
+        provider: "acme".to_owned(),
+        path: "acme/invoice".to_owned(),
+        headers: vec![("x-webhook-id".to_owned(), "wh_forged".to_owned())],
+        body: b"forged".to_vec(),
+        received_at_ms: 1,
+    };
+    let frame = {
+        let note = hookstr_core::sign_webhook_note(&forged, &INTRUDER_SECRET).expect("sign");
+        hookstr_core::event_frame(&note).expect("frame")
+    };
+    world.ndb.process_client_event(&frame).expect("inject");
+
+    assert_eq!(
+        world
+            .ingest("acme/invoice", &[("x-webhook-id", "wh_real")], b"real")
+            .await,
+        StatusCode::NO_CONTENT
+    );
 
     let output = world.drain_once().await;
     assert!(
-        !output.status.success(),
-        "an unallowlisted key must not drain"
+        output.status.success(),
+        "drain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (_, headers, body) = world.next_delivery().await;
+    assert_eq!(body, b"real", "only hookstrd-signed events replay");
+    assert_eq!(
+        headers.get("x-webhook-id").map(String::as_str),
+        Some("wh_real")
+    );
+    // Give a stray forged replay time to show up before calling it absent.
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(
-        stderr.contains("refused auth"),
-        "failure names the auth refusal: {stderr}"
+        world.deliveries.try_recv().is_err(),
+        "the forged event must never replay"
+    );
+
+    let stdout = world.peek(&["--all"]).await;
+    assert!(
+        !stdout.contains("wh_forged"),
+        "peek never shows forged events either: {stdout}"
     );
 }
 
 #[tokio::test]
 async fn peek_prints_without_replaying_and_all_shows_replayed() {
-    let mut world = World::start(&DRAIN_SECRET).await;
+    let mut world = World::start().await;
     assert_eq!(
         world
             .ingest(

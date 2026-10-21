@@ -178,7 +178,7 @@
       <td><code>hookstrd</code></td>
       <td>always-online box (VPS), behind a TLS proxy</td>
       <td>Accepts webhook POSTs, persists each as a signed <code>kind:3003</code> nostr event in
-        nostrdb, and serves them back over an authenticated, read-only relay.</td>
+        nostrdb, and serves them back over a relay bound to localhost.</td>
     </tr>
     <tr>
       <td><code>hookstr</code></td>
@@ -197,11 +197,10 @@
     non-event.</p>
 
   <div class="callout">
-    <b>Two keypairs.</b> The <b>server</b> has its own keypair; it signs every webhook event. The
-    <b>drain</b> has its own keypair; its pubkey goes on the server's
-    <a href="https://github.com/nostr-protocol/nips/blob/master/42.md">NIP-42</a> allowlist so only it
-    can read. You generate the drain key first (<code>hookstr init</code>), because the server config
-    needs its pubkey.
+    <b>One keypair, one tunnel.</b> The <b>server</b> has a keypair; it signs every webhook event,
+    and the drain pins its pubkey as <code>server_pubkey</code>, acting only on events it signed. The
+    relay itself has no auth and accepts writes, so it listens on localhost and the drain reaches it
+    through a tunnel (<code>ssh -L</code>, Tailscale, WireGuard). Only ingest is public.
   </div>
 
   <!-- ─────────────────────────────────────────────────── -->
@@ -215,7 +214,7 @@
 <span class="c"># → target/release/hookstr    (the drain CLI)</span></code></pre>
 
   <p>Copy <code>hookstrd</code> to the server and <code>hookstr</code> to the consumer. They share no
-    state and never talk except over the relay's websocket. <code>cargo test --workspace</code> runs
+    state and never talk except over the relay's websocket, through the tunnel. <code>cargo test --workspace</code> runs
     the full end-to-end suite (real daemon + real drain, in-process) with no external services.</p>
 
   <!-- ─────────────────────────────────────────────────── -->
@@ -232,22 +231,15 @@
 
 <span class="p">$</span> umask 077
 <span class="p">$</span> hookstr keygen | awk '/nsec/{print $2}' &gt; /var/lib/hookstr/server.nsec</code></pre>
-  <div class="caption">The server's pubkey doesn't need to go anywhere — the drain trusts events by signature, not by an allowlist.</div>
+  <div class="caption">hookstrd also logs this pubkey at startup. It's the drain's <code>server_pubkey</code>.</div>
 
-  <h3>2 — Get the drain's pubkey</h3>
-  <p>You need the <em>drain's</em> pubkey for the allowlist. Either jump to
-    <a href="#client">§06</a> and run <code>hookstr init</code> on the consumer first, or generate one
-    now with <code>hookstr keygen</code> and hand its <code>nsec</code> to the consumer later. Keep the
-    hex <code>pubkey</code> handy.</p>
-
-  <h3>3 — Write <code>hookstrd.toml</code></h3>
-  <p>See <a href="#config-ref">§09</a> for the full table. By default one port serves both ingest
-    and the relay (<code>listen_addr</code>); the <a href="#separate">advanced</a> split is below.</p>
+  <h3>2 — Write <code>hookstrd.toml</code></h3>
+  <p>Every key but <code>relay_addr</code> is required. See <a href="#config-ref">§09</a> for the full table.</p>
   <pre><code><span class="p">db_path</span>      = <span class="s">"/var/lib/hookstr/ndb"</span>
 <span class="p">mapsize</span>      = <span class="s">34359738368</span>            <span class="c"># 32 GiB — store-everything, size it generously</span>
-<span class="p">listen_addr</span>  = <span class="s">"127.0.0.1:8080"</span>       <span class="c"># one port: webhook ingest + relay ws (proxy fronts this)</span>
+<span class="p">ingest_addr</span>  = <span class="s">"127.0.0.1:8080"</span>       <span class="c"># axum ingest (the proxy fronts this)</span>
+<span class="p">relay_addr</span>   = <span class="s">"127.0.0.1:8081"</span>       <span class="c"># relay ws, localhost only (the default); NEVER proxy it</span>
 <span class="p">nsec_path</span>    = <span class="s">"/var/lib/hookstr/server.nsec"</span>
-<span class="p">drain_pubkey</span> = <span class="s">"9b3d462694fc29e5…"</span>     <span class="c"># the DRAIN's pubkey, hex — NIP-42 allowlist</span>
 
 <span class="c"># Per-provider ingest secrets. Keep this table LAST: a TOML table swallows</span>
 <span class="c"># every key beneath it. Each value must be unique — the token names its provider.</span>
@@ -255,9 +247,10 @@
 <span class="p">acme</span>   = <span class="s">"long-random-secret-1"</span>
 <span class="p">stripe</span> = <span class="s">"long-random-secret-2"</span></code></pre>
 
-  <h3>4 — Run it</h3>
+  <h3>3 — Run it</h3>
   <pre><code><span class="p">$</span> hookstrd --config /etc/hookstr/hookstrd.toml
-<span class="o">hookstrd listening on 127.0.0.1:8080 (webhook ingest + relay ws)</span></code></pre>
+<span class="o">server pubkey 8f2a… (the drain's server_pubkey)</span>
+<span class="o">hookstrd ingest on 127.0.0.1:8080, relay on ws://127.0.0.1:8081</span></code></pre>
   <p><code>--config</code> defaults to <code>hookstrd.toml</code> in the working directory. Set
     <code>RUST_LOG=info</code> (or <code>debug</code>) for logs. A minimal systemd unit:</p>
   <pre><code>[Service]
@@ -266,37 +259,20 @@
 <span class="p">Restart</span>=always
 <span class="p">User</span>=hookstr</code></pre>
   <div class="callout warn">
-    <b>Bind to localhost.</b> The listener is plaintext and expects the reverse proxy to terminate
-    TLS. Don't expose <code>8080</code> to the internet directly.
+    <b>Bind to localhost.</b> Both listeners are plaintext. Ingest (<code>8080</code>) goes out only
+    through the TLS proxy. The relay (<code>8081</code>) never goes out at all: it has no auth, so
+    anyone who reaches it can read every stored webhook.
   </div>
 
   <!-- ─────────────────────────────────────────────────── -->
   <h2 id="proxy"><span class="n">04</span>Reverse proxy &amp; TLS</h2>
-  <p class="sub">One port; hookstrd sorts ingest from relay itself.</p>
+  <p class="sub">Only ingest is public.</p>
 
-  <p>hookstrd serves ingest and the relay on the one <code>listen_addr</code> and demuxes them by the
-    <code>Upgrade</code> header — a websocket upgrade goes to the relay, everything else
-    (<code>POST /ingest/*</code>, a browser <code>GET /</code>) to the ingest router. So the proxy just
-    terminates TLS and forwards everything; no header-routing of its own:</p>
+  <p>The proxy terminates TLS and forwards to the axum ingest. Don't route the relay through it.
+    Caddy:</p>
   <pre><code><span class="p">hooks.example.com</span> {
-        reverse_proxy localhost:8080
+        reverse_proxy localhost:8080   <span class="c"># axum ingest only</span>
 }</code></pre>
-
-  <div class="callout" id="separate">
-    <b>Advanced — separate binds.</b> Set <code>ingest_addr</code> + <code>relay_addr</code> instead of
-    <code>listen_addr</code> to put the two on their own listeners. The relay can then bind a private
-    interface — e.g. a WireGuard address — and stay off the public internet entirely, while only
-    ingest faces the proxy. Set one form or the other, never both. This mode wants the classic
-    two-<code>handle</code> proxy split (<code>/ingest/*</code> → ingest, everything else → relay).
-  </div>
-
-  <div class="callout warn">
-    <b>nginx: raise the read timeout.</b> The drain holds an idle websocket open while following.
-    nginx's default <code>proxy_read_timeout</code> (60s) resets it every minute. The drain sends a
-    keepalive ping every 25s to survive that, but set <code>proxy_read_timeout 3600s;</code> and the
-    usual <code>Upgrade</code>/<code>Connection</code> headers on the relay <code>location</code>
-    anyway.
-  </div>
 
   <!-- ─────────────────────────────────────────────────── -->
   <h2 id="providers"><span class="n">05</span>Registering providers</h2>
@@ -325,44 +301,40 @@
   <h2 id="client"><span class="n">06</span>Client: the drain CLI</h2>
   <p class="sub">The consumer half. Do this on the machine that handles the webhooks.</p>
 
-  <h3>1 — <code>hookstr init</code></h3>
-  <p>First-run setup. It generates the drain keypair (written <code>0600</code> next to the config),
-    writes a starter config, and prints the pubkey for the server's allowlist. Pass the relay URL:</p>
-  <pre><code><span class="p">$</span> hookstr init wss://hooks.example.com
-<span class="o">wrote keypair /home/you/.config/hookstr/drain.nsec</span>
-<span class="o">wrote config /home/you/.config/hookstr/config.toml</span>
+  <h3>1 — Open a tunnel to the relay</h3>
+  <p>Any tunnel to the server's <code>relay_addr</code> works. With ssh:</p>
+  <pre><code><span class="p">$</span> ssh -NL 8081:127.0.0.1:8081 hooks.example.com</code></pre>
 
-<span class="o">pubkey: 9b3d462694fc29e57ff202a8e8f4caa68c668e5034ac1c00c7c21dadf92a2aa0</span>
-<span class="o">        ^ add this to hookstrd's drain_pubkey allowlist</span></code></pre>
+  <h3>2 — <code>hookstr init</code></h3>
+  <p>First-run setup: writes a starter config. Pass the relay URL as the tunnel exposes it (default
+    <code>ws://127.0.0.1:8081</code>) and the server's pubkey from <a href="#server">§03</a>:</p>
+  <pre><code><span class="p">$</span> hookstr init ws://127.0.0.1:8081 --server-pubkey 8f2a…
+<span class="o">wrote config /home/you/.config/hookstr/config.toml</span>
+<span class="o">then: hookstr drain --target http://localhost:3000/webhooks</span></code></pre>
   <p>The config lands at <code>$XDG_CONFIG_HOME/hookstr/config.toml</code> (falling back to
     <code>~/.config/hookstr/</code>); the local mirror db and replay state go under
-    <code>~/.local/share/hookstr/</code>. <code>init</code> refuses to overwrite an existing config,
-    and keeps an existing keypair if one is already there (it may already be on the allowlist).</p>
-
-  <h3>2 — Put the pubkey on the allowlist</h3>
-  <p>Copy that <code>pubkey</code> into the server's <code>drain_pubkey</code>
-    (<a href="#server">§03</a>) and restart hookstrd. Until then the relay refuses REQ/sync from this
-    key — a permanent refusal the drain won't retry.</p>
+    <code>~/.local/share/hookstr/</code>. <code>init</code> refuses to overwrite an existing
+    config.</p>
 
   <h3>3 — Review the config</h3>
-  <p>The config holds the durable <strong>sync identity</strong> — relay, keys, local db.
-    <code>init</code> already filled it in. Nothing target-related lives here: <em>where</em> the
-    drain delivers is a per-run flag (next step), specific to the consumer it feeds rather than to
-    the sync relationship the config describes.</p>
-  <pre><code><span class="p">relay_url</span> = <span class="s">"wss://hooks.example.com"</span>
-<span class="p">db_path</span>   = <span class="s">"/home/you/.local/share/hookstr/ndb"</span>
-<span class="p">redb_path</span> = <span class="s">"/home/you/.local/share/hookstr/replays.redb"</span>
-<span class="p">nsec_path</span> = <span class="s">"/home/you/.config/hookstr/drain.nsec"</span></code></pre>
+  <p>The config holds the durable <strong>sync identity</strong>: relay, trusted server key, local
+    db. Nothing target-related lives here: <em>where</em> the drain delivers is a per-run flag (next
+    step), specific to the consumer it feeds rather than to the sync relationship the config
+    describes.</p>
+  <pre><code><span class="p">relay_url</span>     = <span class="s">"ws://127.0.0.1:8081"</span>
+<span class="p">server_pubkey</span> = <span class="s">"8f2a…"</span>
+<span class="p">db_path</span>       = <span class="s">"/home/you/.local/share/hookstr/ndb"</span>
+<span class="p">redb_path</span>     = <span class="s">"/home/you/.local/share/hookstr/replays.redb"</span></code></pre>
 
   <h3>4 — <code>hookstr drain</code></h3>
   <pre><code><span class="p">$</span> hookstr drain --target http://localhost:3000/webhooks
-<span class="o">reconciled 42 missing webhook event(s)</span>
+<span class="o">synced 42 missing webhook event(s)</span>
 <span class="o">drain complete: 42 replayed, 0 failed, 0 with no target (42 stored total)</span>
-<span class="o">following: replaying new webhooks as they arrive</span></code></pre>
+<span class="o">following: handling new webhooks as they arrive</span></code></pre>
   <p><code>--target</code> is where deliveries replay — a per-run flag, not config, since it's specific
-    to the consumer this drain feeds. That connects, AUTHs (NIP-42), negentropy-reconciles the
-    backlog, replays it oldest-first, and then <strong>follows</strong> — each new webhook replays in
-    under a second while connected, and a dropped connection redials with backoff. Useful additions
+    to the consumer this drain feeds. That negentropy-reconciles the backlog, replays it
+    oldest-first, and then <strong>follows</strong> — each new webhook replays in under a second while
+    connected, and a dropped connection reconnects and re-syncs on its own. Useful additions
     (each still takes <code>--target</code>):</p>
   <div class="tbl"><table>
     <tr><th>Add to the command</th><th>Effect</th></tr>
@@ -375,6 +347,12 @@
       <td>Pin specific ingest paths to other consumers; these win over <code>--target</code>
         (<a href="#routing">§07</a>).</td></tr>
   </table></div>
+  <p>To look without delivering, <code>hookstr peek</code> syncs the same way and prints each
+    undelivered webhook (path, event id, headers, body) instead of POSTing it. It never writes replay
+    state, so a later drain still delivers everything it showed. <code>--follow</code> keeps printing
+    new arrivals and <code>--all</code> includes ones already replayed. A plain peek can't run beside
+    a running drain, since redb lets one process hold the replay state; use <code>peek --all</code>
+    there.</p>
   <p>Replay state (attempt counts, backoff) is client-local in redb, keyed by event id. A target that's
     down just means backoff and retry — the events are already durable on the server, so nothing is
     lost. Replay is <strong>at-least-once</strong>: your handler must dedupe on the provider's
@@ -411,9 +389,9 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
     <tr><th>Command</th><th>Args / flags</th><th>What it does</th></tr>
     <tr>
       <td><code>init [relay_url]</code></td>
-      <td><code>--config &lt;path&gt;</code></td>
-      <td>First-run setup: generate the drain keypair, write a starter config, print the allowlist
-        pubkey. <code>relay_url</code> is optional (a placeholder is written if omitted).</td>
+      <td><code>--server-pubkey &lt;hex&gt;</code>, <code>--config &lt;path&gt;</code></td>
+      <td>First-run setup: write a starter config. <code>relay_url</code> defaults to
+        <code>ws://127.0.0.1:8081</code>; <code>server_pubkey</code> is a placeholder until set.</td>
     </tr>
     <tr>
       <td><code>drain [providers…]</code></td>
@@ -423,9 +401,17 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
         positional providers scope by <code>t</code> tag.</td>
     </tr>
     <tr>
+      <td><code>peek [providers…]</code></td>
+      <td><code>--follow</code>, <code>--all</code>, <code>--config &lt;path&gt;</code></td>
+      <td>Sync like <code>drain</code>, but print each undelivered webhook to stdout instead of
+        replaying it; never touches replay state. <code>--follow</code> keeps printing new arrivals;
+        <code>--all</code> includes already-replayed ones.</td>
+    </tr>
+    <tr>
       <td><code>keygen</code></td>
       <td>—</td>
-      <td>Print a fresh <code>nsec</code> + hex <code>pubkey</code>. Usable for either side.</td>
+      <td>Print a fresh <code>nsec</code> + hex <code>pubkey</code>, for the server's
+        <code>nsec_path</code>.</td>
     </tr>
   </table></div>
   <p>Config defaults to <code>$XDG_CONFIG_HOME/hookstr/config.toml</code>. Both binaries log via
@@ -444,17 +430,14 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
     <tr><td><code>mapsize</code></td><td><span class="req">required</span></td>
       <td>LMDB map size in bytes — the ceiling on total stored bytes. Size it generously
         (e.g. <code>34359738368</code> = 32 GiB); nothing is ever pruned.</td></tr>
-    <tr><td><code>listen_addr</code></td><td><span class="opt">one of</span></td>
-      <td>Combined mode (default): one plaintext listener for ingest + relay ws, e.g.
-        <code>127.0.0.1:8080</code>. Front with TLS. Set this <em>or</em> the pair below.</td></tr>
-    <tr><td><code>ingest_addr</code><br><code>relay_addr</code></td><td><span class="opt">one of</span></td>
-      <td>Separate mode (advanced): distinct listeners for ingest and the relay ws. Lets the relay
-        bind a private interface (e.g. WireGuard) off the public net. Set <em>both</em>, and not
-        <code>listen_addr</code>.</td></tr>
+    <tr><td><code>ingest_addr</code></td><td><span class="req">required</span></td>
+      <td>axum ingest listen address, e.g. <code>127.0.0.1:8080</code>. Plaintext; front with TLS.</td></tr>
+    <tr><td><code>relay_addr</code></td><td><span class="opt">optional</span></td>
+      <td>relay websocket listen address, default <code>127.0.0.1:8081</code>. No auth and accepts
+        writes: keep it on localhost and reach it by tunnel, never through the proxy.</td></tr>
     <tr><td><code>nsec_path</code></td><td><span class="req">required</span></td>
-      <td>Path to a file holding the server <code>nsec</code>. The key signs every webhook event.</td></tr>
-    <tr><td><code>drain_pubkey</code></td><td><span class="req">required</span></td>
-      <td>The drain's 64-char hex pubkey — the sole entry on the NIP-42 read allowlist.</td></tr>
+      <td>Path to a file holding the server <code>nsec</code>. The key signs every webhook event; its
+        pubkey is the drain's <code>server_pubkey</code>.</td></tr>
     <tr><td><code>[ingest_tokens]</code></td><td><span class="req">required</span></td>
       <td>Table of <code>provider = "token"</code>. Values must be unique. Keep it last in the file.</td></tr>
   </table></div>
@@ -463,13 +446,13 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
   <div class="tbl"><table>
     <tr><th>Key</th><th></th><th>Meaning</th></tr>
     <tr><td><code>relay_url</code></td><td><span class="req">required</span></td>
-      <td>hookstrd's relay endpoint, e.g. <code>wss://hooks.example.com</code>.</td></tr>
+      <td>hookstrd's relay as the tunnel exposes it, e.g. <code>ws://127.0.0.1:8081</code>.</td></tr>
+    <tr><td><code>server_pubkey</code></td><td><span class="req">required</span></td>
+      <td>hookstrd's 64-char hex pubkey. Only events it signed are synced or replayed.</td></tr>
     <tr><td><code>db_path</code></td><td><span class="req">required</span></td>
       <td>Local mirror nostrdb — negentropy needs the full local set here.</td></tr>
     <tr><td><code>redb_path</code></td><td><span class="req">required</span></td>
       <td>Replay bookkeeping (event id → status / attempts / next retry).</td></tr>
-    <tr><td><code>nsec_path</code></td><td><span class="req">required</span></td>
-      <td>File holding the drain <code>nsec</code>; its pubkey is on the server's allowlist.</td></tr>
     <tr><td><code>[targets]</code></td><td><span class="opt">optional</span></td>
       <td>Per-path overrides, <code>"provider/path" = "http://…"</code>, for routes that don't mirror
         the ingest path. Win over <code>--target</code>.</td></tr>
@@ -492,8 +475,10 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
       delivery id.</td></tr>
     <tr><td>replay target down</td><td>redb records the failure and backs off; events are already
       durable, so the next drain retries.</td></tr>
-    <tr><td>unauthed / wrong-key ws client</td><td>NIP-42: no REQ or sync until AUTH from the
-      allowlisted pubkey. A wrong key is a permanent refusal.</td></tr>
+    <tr><td>someone reaches the relay</td><td>It has no auth: they can read every stored webhook. Keep
+      <code>relay_addr</code> on localhost and behind a tunnel.</td></tr>
+    <tr><td>events pushed into the relay</td><td>Stored, but never synced or replayed: the drain only
+      acts on events signed by <code>server_pubkey</code>.</td></tr>
     <tr><td>ingest URL leaks</td><td>Rotate that provider's token, restart, re-register. Others
       unaffected.</td></tr>
   </table></div>
@@ -508,7 +493,6 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
   <footer>
     <a href="./">← overview</a>
     <a href="https://github.com/jb55/hookstr">source on github ↗</a>
-    <a href="https://github.com/nostr-protocol/nips/blob/master/42.md">NIP-42 auth</a>
     <a href="https://github.com/nostr-protocol/nips/blob/master/77.md">NIP-77 sync</a>
   </footer>
 </div>

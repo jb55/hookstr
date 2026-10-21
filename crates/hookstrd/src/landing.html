@@ -209,8 +209,8 @@
       <div class="body">
         <div class="t"><span class="loc">hookstrd → your machine</span> · minutes or days later</div>
         <div class="h">Your drain comes back and pulls it down</div>
-        <div class="d">The drain reconnects, authenticates (NIP-42), and negentropy-reconciles
-          (NIP-77) every event it missed — then keeps following new ones live.</div>
+        <div class="d">The drain reconnects over its tunnel and negentropy-reconciles (NIP-77)
+          every event it missed — then keeps following new ones live.</div>
         <span class="form nostr">nostr event · over ws</span>
       </div>
     </div>
@@ -267,7 +267,7 @@
       <h3><code>hookstrd</code></h3>
       <p>Runs permanently on always-online infra behind a TLS-terminating reverse proxy. Accepts
       any webhook with a fast 2xx, persists it as a signed nostr event in nostrdb, and serves those
-      events back over an authenticated (NIP-42) embedded nostr relay.</p>
+      events back over an embedded nostr relay that listens on localhost only.</p>
     </div>
     <div class="card">
       <h3><code>hookstr drain</code></h3>
@@ -288,14 +288,14 @@
       ingest path.</li>
     <li><b>Store everything</b>No deletion, ever. Negentropy reconciles over the full set, which
       makes sync trivial.</li>
-    <li><b>Pull-only</b>The relay is read-only (NIP-42-gated, <code>accept_events = false</code>);
-      hookstrd's DB is the source of truth and nothing pushes into it over the wire.</li>
+    <li><b>Pull-only, trusting one key</b>The relay has no auth, so it binds to localhost and the
+      drain reaches it through a tunnel. The drain acts only on events signed by hookstrd's own key,
+      so nothing else pushed into the relay is ever replayed.</li>
   </ul>
 
   <p class="rl instance-only" style="margin-top:32px">
-    This URL is a nostr relay. Point a NIP-42-authenticated client at
-    <code>wss://</code>&lt;this host&gt; to sync. Providers POST to
-    <code>/ingest/{token}/…</code>.
+    This is a hookstr ingest endpoint. Providers POST to <code>/ingest/{token}/…</code>; the drain
+    syncs from this host's relay over a tunnel.
   </p>
 
   <p class="rl" style="margin-top:32px">
@@ -307,7 +307,6 @@
     <a href="docs.html">setup docs</a>
     <a href="https://github.com/jb55/hookstr">source on github ↗</a>
     <a href="https://github.com/nostr-protocol/nostr">nostr protocol</a>
-    <a href="https://github.com/nostr-protocol/nips/blob/master/42.md">NIP-42 auth</a>
     <a href="https://github.com/nostr-protocol/nips/blob/master/77.md">NIP-77 sync</a>
   </footer>
 </div>

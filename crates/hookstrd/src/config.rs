@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 #[derive(Parser)]
-#[command(about = "store-and-forward webhook daemon: HTTP ingest + authenticated nostr relay")]
+#[command(about = "store-and-forward webhook daemon: HTTP ingest + localhost nostr relay")]
 struct Args {
     /// Path to the TOML config file.
     #[arg(long, default_value = "hookstrd.toml")]
@@ -20,20 +20,21 @@ pub struct HookstrdConfig {
     /// generously and forget about it.
     pub db_path: String,
     pub mapsize: usize,
-    /// Combined mode: one plaintext listener serving both the webhook ingest
-    /// HTTP API and the nostr relay (ws), demuxed by the `Upgrade` header (see
-    /// `hookstrd::serve`). Set this *or* `ingest_addr` + `relay_addr`, not both.
+    /// The old combined ingest + relay port. Only read so a config that still
+    /// sets it fails with a pointer to `ingest_addr` (see
+    /// [`HookstrdConfig::ingest_addr`]).
     #[serde(default)]
-    pub listen_addr: Option<SocketAddr>,
-    /// Separate mode: the axum webhook-ingest listener, plaintext (the reverse
-    /// proxy terminates TLS). Pairs with `relay_addr`.
+    listen_addr: Option<SocketAddr>,
+    /// Plaintext listener for the webhook ingest HTTP API. The reverse proxy
+    /// terminates TLS and forwards provider POSTs here.
     #[serde(default)]
-    pub ingest_addr: Option<String>,
-    /// Separate mode: the nostr relay (ws) listener. Splitting it from
-    /// `ingest_addr` lets it bind a private interface — e.g. a WireGuard
-    /// address — and stay off the public internet the way ingest can't.
-    #[serde(default)]
-    pub relay_addr: Option<SocketAddr>,
+    ingest_addr: Option<String>,
+    /// The nostr relay (ws) the drain syncs from. It has no auth and accepts
+    /// writes, so keep it off the public internet: the default binds
+    /// localhost, and the drain reaches it over a tunnel (or bind a private
+    /// interface, e.g. a WireGuard address).
+    #[serde(default = "default_relay_addr")]
+    pub relay_addr: SocketAddr,
     /// Per-provider ingest secrets. The `{token}` in the URL alone
     /// authenticates a delivery and names its provider, so each provider gets
     /// its own secret you can revoke without disturbing the others. Values
@@ -42,17 +43,10 @@ pub struct HookstrdConfig {
     /// File containing the server nsec (not the key itself — keep secrets
     /// out of config that might get committed).
     pub nsec_path: String,
-    /// NIP-42 allowlist: the drain client's pubkey (hex).
-    pub drain_pubkey: String,
 }
 
-/// How the ingest HTTP API and relay ws are bound. Combined is the default;
-/// separate is the advanced opt-in for keeping the relay off the public net.
-pub enum Listen {
-    /// One port, ingest + relay demuxed by the `Upgrade` header.
-    Combined(SocketAddr),
-    /// Two listeners; the relay can bind a private interface.
-    Separate { ingest_addr: String, relay_addr: SocketAddr },
+fn default_relay_addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 8081))
 }
 
 impl HookstrdConfig {
@@ -67,53 +61,32 @@ impl HookstrdConfig {
             unique.len() == cfg.ingest_tokens.len(),
             "ingest_tokens values must be unique: a token names its provider"
         );
-        // Fail fast on a bad addressing combo rather than after opening the db.
-        cfg.listen()?;
+        // Fail fast on a bad address rather than after opening the db.
+        cfg.ingest_addr()?;
         Ok(cfg)
     }
 
-    /// Resolve the listener configuration, erroring unless exactly one of the
-    /// two forms is fully specified. Combined (`listen_addr`) is the default;
-    /// separate (`ingest_addr` + `relay_addr`) is the advanced alternative.
-    pub fn listen(&self) -> anyhow::Result<Listen> {
-        match (self.listen_addr, &self.ingest_addr, self.relay_addr) {
-            (Some(addr), None, None) => Ok(Listen::Combined(addr)),
-            (None, Some(ingest_addr), Some(relay_addr)) => Ok(Listen::Separate {
-                ingest_addr: ingest_addr.clone(),
-                relay_addr,
-            }),
-            (Some(_), _, _) => anyhow::bail!(
-                "listen_addr sets one combined port; drop ingest_addr/relay_addr to use it"
+    /// The ingest listen address. Ingest and the relay always bind
+    /// separately now: the relay has no auth, so it can't share the public
+    /// port the way the old combined `listen_addr` mode had it.
+    pub fn ingest_addr(&self) -> anyhow::Result<&str> {
+        match (self.listen_addr, &self.ingest_addr) {
+            (Some(_), _) => anyhow::bail!(
+                "listen_addr (one combined ingest + relay port) is gone: the relay has no auth, so it can't share the public port. Rename it to ingest_addr; the relay binds relay_addr (default 127.0.0.1:8081)"
             ),
-            (None, None, None) => anyhow::bail!(
-                "no listener: set listen_addr (one combined port), or ingest_addr + relay_addr to split them"
-            ),
-            (None, _, _) => anyhow::bail!(
-                "separate binds need both ingest_addr and relay_addr (or use a single listen_addr)"
-            ),
+            (None, Some(addr)) => Ok(addr),
+            (None, None) => anyhow::bail!("no ingest listener: set ingest_addr"),
         }
     }
 
-    pub fn seckey(&self) -> anyhow::Result<[u8; 32]> {
+    /// The server keypair as (seckey, hex pubkey). The key signs every
+    /// webhook event; the pubkey is what the drain pins as `server_pubkey`.
+    pub fn keys(&self) -> anyhow::Result<([u8; 32], String)> {
         let nsec = std::fs::read_to_string(&self.nsec_path)
             .with_context(|| format!("reading nsec from {}", self.nsec_path))?;
-        let (hrp, data) = bech32::decode(nsec.trim())
-            .map_err(|_| anyhow::anyhow!("{} does not hold bech32", self.nsec_path))?;
-        anyhow::ensure!(
-            hrp.as_str() == "nsec",
-            "expected an nsec in {}, got '{}'",
-            self.nsec_path,
-            hrp.as_str()
-        );
-        data.try_into()
-            .map_err(|_| anyhow::anyhow!("nsec did not decode to 32 bytes"))
-    }
-
-    pub fn drain_pubkey(&self) -> anyhow::Result<[u8; 32]> {
-        hex::decode(&self.drain_pubkey)
-            .ok()
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or_else(|| anyhow::anyhow!("drain_pubkey must be a 64-char hex pubkey"))
+        let (seckey, pubkey) = nostrdb_net::relay::sync::parse_nsec(nsec.trim())
+            .map_err(|e| anyhow::anyhow!("{}: {e}", self.nsec_path))?;
+        Ok((seckey, pubkey.hex()))
     }
 }
 
@@ -124,46 +97,35 @@ mod tests {
     /// Parse a config with the given address lines (the rest is boilerplate).
     fn cfg(addr_lines: &str) -> HookstrdConfig {
         let text = format!(
-            "db_path = \"x\"\nmapsize = 1\nnsec_path = \"n\"\ndrain_pubkey = \"ab\"\n\
+            "db_path = \"x\"\nmapsize = 1\nnsec_path = \"n\"\n\
              {addr_lines}\n[ingest_tokens]\nacme = \"t\"\n"
         );
         toml::from_str(&text).expect("parse")
     }
 
     #[test]
-    fn listen_addr_is_combined() {
-        assert!(matches!(
-            cfg("listen_addr = \"127.0.0.1:8080\"").listen().unwrap(),
-            Listen::Combined(_)
-        ));
+    fn ingest_addr_alone_puts_the_relay_on_localhost() {
+        let cfg = cfg("ingest_addr = \"127.0.0.1:8080\"");
+        assert_eq!(cfg.ingest_addr().unwrap(), "127.0.0.1:8080");
+        assert_eq!(cfg.relay_addr, default_relay_addr());
     }
 
     #[test]
-    fn ingest_and_relay_addr_is_separate() {
-        assert!(matches!(
-            cfg("ingest_addr = \"127.0.0.1:8080\"\nrelay_addr = \"10.0.0.1:8081\"")
-                .listen()
-                .unwrap(),
-            Listen::Separate { .. }
-        ));
+    fn relay_addr_overrides_the_default() {
+        let cfg = cfg("ingest_addr = \"127.0.0.1:8080\"\nrelay_addr = \"10.0.0.1:8081\"");
+        assert_eq!(cfg.relay_addr, "10.0.0.1:8081".parse().unwrap());
     }
 
     #[test]
-    fn combined_and_separate_together_is_error() {
-        assert!(
-            cfg("listen_addr = \"127.0.0.1:8080\"\nrelay_addr = \"10.0.0.1:8081\"")
-                .listen()
-                .is_err()
-        );
+    fn combined_listen_addr_is_error() {
+        let err = cfg("listen_addr = \"127.0.0.1:8080\"")
+            .ingest_addr()
+            .unwrap_err();
+        assert!(format!("{err}").contains("ingest_addr"), "{err}");
     }
 
     #[test]
     fn no_address_is_error() {
-        assert!(cfg("").listen().is_err());
-    }
-
-    #[test]
-    fn half_a_separate_pair_is_error() {
-        assert!(cfg("ingest_addr = \"127.0.0.1:8080\"").listen().is_err());
+        assert!(cfg("").ingest_addr().is_err());
     }
 }

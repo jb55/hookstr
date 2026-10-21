@@ -1,5 +1,13 @@
 # hookstr — store-and-forward webhook service, backed by nostr
 
+> **Update (2026-10-21):** NIP-42 auth is gone. hookstr now builds against
+> nostrdb-rs's `sync-progress` branch, whose relay has no auth and accepts
+> EVENTs. hookstrd serves that relay on its own `relay_addr` (localhost by
+> default) and ingest on `ingest_addr`; the combined `listen_addr` mode is
+> gone. The drain reaches the relay through a tunnel and acts only on events
+> signed by the pinned `server_pubkey`. The NIP-42 sections below are the
+> original design record. See the README for the current setup.
+
 ## What this is
 
 Webhook providers demand an always-online HTTPS endpoint and typically

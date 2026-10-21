@@ -10,15 +10,12 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::StreamExt;
-use hyper_util::rt::TokioIo;
-use hyper_util::service::TowerToHyperService;
 use nostrdb::{Filter, Ndb, SubscriptionStream};
-use nostrdb_net::relay::server::AuthConfig;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use nostrdb_net::relay::server::RelayHandle;
+use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::net::TcpListener;
 
 /// How long ingest waits for nostrdb's background writer to commit a note
 /// before giving up and telling the provider to retry.
@@ -37,9 +34,7 @@ pub struct Ingest {
     pub tokens: HashMap<String, String>,
 }
 
-/// A static info page for humans who open the service in a browser. hookstrd
-/// serves the relay and this page on one port, telling a websocket upgrade on
-/// `/` apart from a plain browser `GET /` itself (see [`serve`]).
+/// A static info page for humans who open the service in a browser.
 const LANDING: &str = include_str!("landing.html");
 
 /// The detailed setup/usage docs, linked from the landing page. Served at
@@ -57,112 +52,22 @@ pub fn router(ingest: Ingest) -> Router {
         .with_state(ingest)
 }
 
-/// How long to wait for a new connection's HTTP header block before giving up on
-/// classifying it. In practice the whole block is in the first segment; this
-/// only bounds a pathologically slow (or non-HTTP) peer.
-const HEADER_PEEK_TIMEOUT: Duration = Duration::from_secs(5);
-/// Cap on the leading bytes we peek looking for the header terminator.
-const HEADER_PEEK_MAX: usize = 4096;
+/// Serve the webhook ingest HTTP API (and the landing/docs pages) on
+/// `listener`. This is the public side: providers POST here through the
+/// reverse proxy.
+pub async fn serve(listener: TcpListener, ingest: Ingest) -> std::io::Result<()> {
+    axum::serve(listener, router(ingest)).await
+}
 
-/// Serve the authenticated nostr relay (websocket) and the webhook ingest HTTP
-/// API on a **single** `listener`.
+/// Spawn the nostr relay the drain syncs from, on its own `addr`.
 ///
-/// hookstrd owns the accept loop: for each connection it peeks the leading bytes
-/// — without consuming them, since both handlers re-read from the start — and
-/// dispatches a websocket upgrade to the NIP-42 relay and everything else to the
-/// axum ingest [`router`]. One public port backs both, so a reverse proxy in
-/// front needs no `Upgrade`-header routing of its own; it just forwards. The
-/// relay is gated to `allowed_pubkeys` and never accepts events (the drain
-/// pulls; ingest writes into nostrdb directly, not over the wire).
-pub async fn serve(
-    listener: TcpListener,
-    ingest: Ingest,
-    allowed_pubkeys: HashSet<[u8; 32]>,
-) -> std::io::Result<()> {
-    let ndb = ingest.ndb.clone();
-    let app = router(ingest);
-    let auth = Arc::new(AuthConfig {
-        allowed_pubkeys,
-        accept_events: false,
-    });
-    // Held for the loop's lifetime; dropping it (on process exit) tells every
-    // live relay connection to wind down.
-    let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    loop {
-        let (stream, _peer) = listener.accept().await?;
-        if is_ws_upgrade(&stream).await {
-            let ndb = ndb.clone();
-            let auth = Some(auth.clone());
-            let shutdown_rx = shutdown_rx.clone();
-            tokio::spawn(async move {
-                if let Err(err) =
-                    nostrdb_net::relay::server::serve(stream, ndb, auth, shutdown_rx).await
-                {
-                    tracing::debug!("relay connection ended: {err}");
-                }
-            });
-        } else {
-            let app = app.clone();
-            tokio::spawn(async move {
-                let io = TokioIo::new(stream);
-                let service = TowerToHyperService::new(app);
-                if let Err(err) = hyper::server::conn::http1::Builder::new()
-                    .serve_connection(io, service)
-                    .await
-                {
-                    tracing::debug!("ingest connection ended: {err}");
-                }
-            });
-        }
-    }
-}
-
-/// Peek a new connection's leading bytes (without consuming them) and decide
-/// whether it's a WebSocket upgrade, by looking for an `Upgrade: websocket`
-/// header. Method alone can't decide: a browser hitting `/` and a ws upgrade to
-/// `/` are both `GET /`.
-async fn is_ws_upgrade(stream: &TcpStream) -> bool {
-    let mut buf = vec![0u8; HEADER_PEEK_MAX];
-    let deadline = tokio::time::Instant::now() + HEADER_PEEK_TIMEOUT;
-    loop {
-        let n = match tokio::time::timeout_at(deadline, stream.peek(&mut buf)).await {
-            Ok(Ok(n)) => n,
-            // Timed out, closed, or errored: not a ws upgrade — let the HTTP
-            // path handle (and properly error on) it.
-            _ => return false,
-        };
-        if n == 0 {
-            return false;
-        }
-        let head = &buf[..n];
-        if let Some(end) = find_header_end(head) {
-            return header_has_ws_upgrade(&head[..end]);
-        }
-        if n >= buf.len() {
-            // Header block bigger than we'll peek; decide on what we have.
-            return header_has_ws_upgrade(head);
-        }
-        // The block hasn't fully arrived. peek() returns immediately with
-        // whatever is buffered, so yield briefly rather than hot-loop while the
-        // rest is still in flight.
-        tokio::time::sleep(Duration::from_millis(1)).await;
-    }
-}
-
-/// Offset just past the `\r\n\r\n` ending an HTTP header block, if present.
-fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
-}
-
-/// Whether the header block carries `Upgrade: websocket` (the mark of a
-/// WebSocket handshake), matched case-insensitively.
-fn header_has_ws_upgrade(head: &[u8]) -> bool {
-    let head = String::from_utf8_lossy(head).to_ascii_lowercase();
-    head.lines().any(|line| {
-        line.split_once(':')
-            .is_some_and(|(name, value)| name.trim() == "upgrade" && value.contains("websocket"))
-    })
+/// The relay has no auth and ingests any `EVENT` a client sends, so it must
+/// not be reachable by anyone but the drain: bind it to localhost and reach it
+/// over a tunnel (ssh -L, Tailscale, WireGuard). The drain only acts on events
+/// signed by this server's key, so anything pushed into it is stored but never
+/// replayed. Dropping the handle stops the relay.
+pub fn spawn_relay(ndb: Ndb, addr: SocketAddr) -> std::io::Result<RelayHandle> {
+    nostrdb_net::relay::server::spawn(ndb, addr)
 }
 
 /// The browser landing page describing what hookstr is.
