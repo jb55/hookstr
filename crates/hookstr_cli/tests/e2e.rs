@@ -199,6 +199,27 @@ nsec_path = "{}"
         .expect("drain spawns")
     }
 
+    /// Run `peek` (one-shot) with extra args and hand back its stdout.
+    async fn peek(&self, args: &[&str]) -> String {
+        let output = tokio::time::timeout(
+            Duration::from_secs(60),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_hookstr"))
+                .args(["peek", "--config", self.cfg_path.to_str().unwrap()])
+                .args(args)
+                .current_dir(self.tmp.path())
+                .output(),
+        )
+        .await
+        .expect("peek finishes within timeout")
+        .expect("peek spawns");
+        assert!(
+            output.status.success(),
+            "peek failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
     async fn next_delivery(&mut self) -> Delivery {
         tokio::time::timeout(Duration::from_secs(30), self.deliveries.recv())
             .await
@@ -534,5 +555,68 @@ async fn drain_with_a_key_off_the_allowlist_is_refused() {
     assert!(
         stderr.contains("refused auth"),
         "failure names the auth refusal: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn peek_prints_without_replaying_and_all_shows_replayed() {
+    let mut world = World::start(&DRAIN_SECRET).await;
+    assert_eq!(
+        world
+            .ingest(
+                "acme/invoice",
+                &[("x-webhook-id", "wh_peek")],
+                br#"{"event":"peek"}"#,
+            )
+            .await,
+        StatusCode::NO_CONTENT
+    );
+
+    // Undelivered: peek shows it, and nothing reaches the target.
+    let stdout = world.peek(&[]).await;
+    assert!(
+        stdout.contains("--- acme/invoice"),
+        "path printed: {stdout}"
+    );
+    assert!(
+        stdout.contains("x-webhook-id: wh_peek"),
+        "headers printed: {stdout}"
+    );
+    assert!(
+        stdout.contains(r#"{"event":"peek"}"#),
+        "body printed: {stdout}"
+    );
+    assert!(
+        !stdout.contains("POST "),
+        "no [targets] route, so no POST line: {stdout}"
+    );
+    assert!(
+        world.deliveries.try_recv().is_err(),
+        "peek must not POST anything"
+    );
+
+    // Peek left replay state alone, so a real drain still delivers it.
+    let output = world.drain_once().await;
+    assert!(
+        output.status.success(),
+        "drain after peek failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (path, _headers, body) = world.next_delivery().await;
+    assert_eq!(
+        (path.as_str(), body.as_slice()),
+        ("acme/invoice", &br#"{"event":"peek"}"#[..])
+    );
+
+    // Replayed now: plain peek has nothing to show, --all still shows it.
+    let stdout = world.peek(&[]).await;
+    assert!(
+        !stdout.contains("acme/invoice"),
+        "a replayed webhook is not due: {stdout}"
+    );
+    let stdout = world.peek(&["--all"]).await;
+    assert!(
+        stdout.contains("--- acme/invoice"),
+        "--all shows replayed webhooks: {stdout}"
     );
 }

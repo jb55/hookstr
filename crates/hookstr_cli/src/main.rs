@@ -10,6 +10,9 @@
 //! notifications in follow mode — is read back out of the local nostrdb, so
 //! replay never trusts a wire frame.
 //!
+//! `peek` runs the same sync but prints deliveries instead of replaying them,
+//! and never writes replay state.
+//!
 //! Milestone 1 syncs with a dumb `until`-paginated REQ; negentropy reconcile
 //! replaces the catch-up in milestone 2 (see ../../SPIKE.md).
 //!
@@ -101,6 +104,28 @@ enum Command {
         #[arg(long)]
         config: Option<String>,
     },
+    /// Sync webhooks down from the relay like `drain`, but print them to
+    /// stdout instead of replaying them: path, event id, headers and body.
+    /// Never POSTs and never touches replay state, so a later drain still
+    /// delivers everything shown. Prints the undelivered backlog and exits;
+    /// pass --follow to keep printing new webhooks as they arrive.
+    Peek {
+        /// Path to the TOML config file
+        /// (default: $XDG_CONFIG_HOME/hookstr/config.toml).
+        #[arg(long)]
+        config: Option<String>,
+        /// Stay connected and print new webhooks as they arrive.
+        #[arg(long)]
+        follow: bool,
+        /// Show every stored webhook, including ones already replayed or
+        /// waiting out a retry backoff, not just the ones a drain would send
+        /// next.
+        #[arg(long)]
+        all: bool,
+        /// Providers to show, matched on each event's indexed `t` tag.
+        /// Empty = all.
+        providers: Vec<String>,
+    },
     /// Generate a keypair (for either side; the drain's pubkey goes in
     /// hookstrd's allowlist).
     Keygen,
@@ -109,8 +134,11 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Default to info so drain progress (reconcile/replay/follow) is visible
-    // without RUST_LOG; RUST_LOG still overrides when set.
+    // without RUST_LOG; RUST_LOG still overrides when set. Logs go to stderr
+    // so stdout carries only command output (peeked deliveries, keygen) and
+    // stays pipeable.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -133,6 +161,16 @@ async fn main() -> anyhow::Result<()> {
                 "no replay target: pass --target <url>, or add a [targets] entry to the config"
             );
             drain(cfg, !once).await
+        }
+        Command::Peek {
+            config,
+            follow,
+            all,
+            providers,
+        } => {
+            let mut cfg = DrainConfig::load(config.as_deref())?;
+            cfg.providers = providers;
+            peek(cfg, follow, all).await
         }
         Command::Init { relay_url, config } => init(relay_url, config),
         Command::Keygen => keygen(),
@@ -234,15 +272,65 @@ nsec_path = "{nsec}"
     Ok(())
 }
 
+/// What a run does with each stored delivery it finds.
+enum Mode<'a> {
+    /// `drain`: POST it to its target and record the outcome.
+    Replay {
+        state: &'a ReplayState,
+        http: &'a reqwest::Client,
+    },
+    /// `peek`: print it. With a replay state, only deliveries a drain would
+    /// send next are printed; without one (`--all`), every one is.
+    Peek { state: Option<&'a ReplayState> },
+}
+
 async fn drain(cfg: DrainConfig, follow: bool) -> anyhow::Result<()> {
-    let seckey = cfg.seckey()?;
     let state = ReplayState::open(&cfg.redb_path)?;
+    let http = reqwest::Client::new();
+    run(
+        &cfg,
+        &Mode::Replay {
+            state: &state,
+            http: &http,
+        },
+        follow,
+    )
+    .await
+}
+
+async fn peek(cfg: DrainConfig, follow: bool, all: bool) -> anyhow::Result<()> {
+    // --all never consults replay state, so it doesn't even open it. That
+    // also makes it the one peek that works beside a running drain: redb
+    // locks the file for whichever process opened it first.
+    let state = if all {
+        None
+    } else {
+        Some(ReplayState::open(&cfg.redb_path).map_err(|err| {
+            anyhow::anyhow!(
+                "opening replay state {}: {err:#} (if a drain is running, `peek --all` works without it)",
+                cfg.redb_path
+            )
+        })?)
+    };
+    run(
+        &cfg,
+        &Mode::Peek {
+            state: state.as_ref(),
+        },
+        follow,
+    )
+    .await
+}
+
+/// Sync and act on the local mirror; in follow mode, redial dropped
+/// connections until an unrecoverable error.
+async fn run(cfg: &DrainConfig, mode: &Mode<'_>, follow: bool) -> anyhow::Result<()> {
+    let seckey = cfg.seckey()?;
     std::fs::create_dir_all(&cfg.db_path)?;
     let ndb = Ndb::new(&cfg.db_path, &Config::new())?;
-    let http = reqwest::Client::new();
 
     loop {
-        match connect_and_drain(&cfg, &seckey, &state, &ndb, &http, follow).await {
+        match connect_and_run(cfg, &seckey, &ndb, mode, follow).await {
             // One-shot ran to completion. (Follow mode only returns Err.)
             Ok(()) => return Ok(()),
             // An auth refusal is permanent (wrong key / not on the
@@ -256,14 +344,13 @@ async fn drain(cfg: DrainConfig, follow: bool) -> anyhow::Result<()> {
     }
 }
 
-/// One connection's worth of work: catch up, replay the backlog, and (in
+/// One connection's worth of work: catch up, handle the backlog, and (in
 /// follow mode) hold the standing subscription until the connection dies.
-async fn connect_and_drain(
+async fn connect_and_run(
     cfg: &DrainConfig,
     seckey: &[u8; 32],
-    state: &ReplayState,
     ndb: &Ndb,
-    http: &reqwest::Client,
+    mode: &Mode<'_>,
     follow: bool,
 ) -> anyhow::Result<()> {
     let mut relay = sync::Relay::connect(&cfg.relay_url)
@@ -297,12 +384,12 @@ async fn connect_and_drain(
         None
     };
 
-    replay_backlog(cfg, state, ndb, http).await?;
+    handle_backlog(cfg, ndb, mode).await?;
 
     let Some(incoming) = incoming.as_mut() else {
         return Ok(());
     };
-    tracing::info!("following: replaying new webhooks as they arrive");
+    tracing::info!("following: handling new webhooks as they arrive");
     let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // First tick fires immediately; skip it so we don't ping the instant we
@@ -328,7 +415,7 @@ async fn connect_and_drain(
                         .collect()
                 };
                 for id in ids {
-                    replay_event(cfg, state, ndb, http, &id).await?;
+                    handle_event(cfg, ndb, mode, &id).await?;
                 }
             }
         }
@@ -367,13 +454,8 @@ async fn catch_up(providers: &[String], relay: &mut sync::Relay, ndb: &Ndb) -> a
     Ok(())
 }
 
-/// Replay everything stored locally that is due, oldest first.
-async fn replay_backlog(
-    cfg: &DrainConfig,
-    state: &ReplayState,
-    ndb: &Ndb,
-    http: &reqwest::Client,
-) -> anyhow::Result<()> {
+/// Handle everything stored locally that is due, oldest first.
+async fn handle_backlog(cfg: &DrainConfig, ndb: &Ndb, mode: &Mode<'_>) -> anyhow::Result<()> {
     // Collected owned so the non-Send Transaction is gone before the awaits.
     let mut backlog = {
         let txn = Transaction::new(ndb)?;
@@ -385,14 +467,22 @@ async fn replay_backlog(
     };
     backlog.sort_by_key(|(_, created_at)| *created_at);
 
-    let (mut replayed, mut failed, mut unrouted) = (0usize, 0usize, 0usize);
+    let (mut replayed, mut failed, mut unrouted, mut printed) = (0usize, 0usize, 0usize, 0usize);
     for (id, _) in &backlog {
-        match replay_event(cfg, state, ndb, http, id).await? {
+        match handle_event(cfg, ndb, mode, id).await? {
             Outcome::Replayed => replayed += 1,
             Outcome::Failed => failed += 1,
             Outcome::NoTarget => unrouted += 1,
+            Outcome::Printed => printed += 1,
             Outcome::NotDue => {}
         }
+    }
+    if let Mode::Peek { .. } = mode {
+        tracing::info!(
+            "peek complete: {printed} printed ({} stored total)",
+            backlog.len()
+        );
+        return Ok(());
     }
     tracing::info!(
         "drain complete: {replayed} replayed, {failed} failed, {unrouted} with no target ({} stored total)",
@@ -405,21 +495,29 @@ enum Outcome {
     Replayed,
     Failed,
     NoTarget,
+    /// Peek: printed.
+    Printed,
     /// Already replayed, in backoff, or not (yet) in the local db.
     NotDue,
 }
 
-/// Replay one stored delivery if it's due: load it from the local db (the
-/// only trusted source), route it, POST it, record the outcome.
-async fn replay_event(
+/// Handle one stored delivery if it's due: load it from the local db (the
+/// only trusted source), then print it (peek) or route, POST and record it
+/// (drain).
+async fn handle_event(
     cfg: &DrainConfig,
-    state: &ReplayState,
     ndb: &Ndb,
-    http: &reqwest::Client,
+    mode: &Mode<'_>,
     id: &[u8; 32],
 ) -> anyhow::Result<Outcome> {
-    if !state.is_due(id, now_s())? {
-        return Ok(Outcome::NotDue);
+    let due_state = match mode {
+        Mode::Replay { state, .. } => Some(*state),
+        Mode::Peek { state } => *state,
+    };
+    if let Some(state) = due_state {
+        if !state.is_due(id, now_s())? {
+            return Ok(Outcome::NotDue);
+        }
     }
     let rec = {
         let txn = Transaction::new(ndb)?;
@@ -429,6 +527,10 @@ async fn replay_event(
     };
     let Some(rec) = rec else {
         return Ok(Outcome::NotDue);
+    };
+    let Mode::Replay { state, http } = mode else {
+        print_delivery(id, cfg.target_for(&rec.path).as_deref(), &rec)?;
+        return Ok(Outcome::Printed);
     };
     let Some(target) = cfg.target_for(&rec.path) else {
         // Unroutable provider path: leave unreplayed so a later config
@@ -467,6 +569,40 @@ async fn replay(http: &reqwest::Client, target: &str, rec: &WebhookRecord) -> an
         "target answered {}",
         resp.status()
     );
+    Ok(())
+}
+
+/// Peek output: the delivery as its replay POST would carry it, under a
+/// separator naming its path and event id. The POST line appears only when
+/// the config's [targets] routes the path. A non-UTF-8 body prints as hex.
+fn print_delivery(id: &[u8; 32], target: Option<&str>, rec: &WebhookRecord) -> anyhow::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    writeln!(
+        out,
+        "--- {} id={} received_at_ms={}",
+        rec.path,
+        hex::encode(id),
+        rec.received_at_ms
+    )?;
+    if let Some(target) = target {
+        writeln!(out, "POST {target}")?;
+    }
+    for (name, value) in &rec.headers {
+        writeln!(out, "{name}: {value}")?;
+    }
+    writeln!(out)?;
+    match std::str::from_utf8(&rec.body) {
+        Ok(text) => writeln!(out, "{text}")?,
+        Err(_) => writeln!(
+            out,
+            "<{}-byte non-UTF-8 body, hex> {}",
+            rec.body.len(),
+            hex::encode(&rec.body)
+        )?,
+    }
+    writeln!(out)?;
+    out.flush()?;
     Ok(())
 }
 

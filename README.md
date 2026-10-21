@@ -166,6 +166,27 @@ scoped drain with its own `--target`:
 $ hookstr drain --target http://localhost:3003 acme
 ```
 
+To look at webhooks without delivering them, use `hookstr peek`. It
+syncs like a drain, prints each undelivered webhook to stdout (path,
+event id, headers, body) and exits. It never POSTs and never writes
+replay state, so a later drain still delivers everything it showed.
+`--follow` keeps printing new webhooks as they arrive, `--all` includes
+ones already replayed, and positional providers narrow it as with drain:
+
+```
+$ hookstr peek acme
+--- acme/invoice id=5f3c… received_at_ms=1761040000000
+content-type: application/json
+x-webhook-id: wh_1
+
+{"event":"invoice.paid","amount_cents":1234}
+```
+
+A `POST <url>` line follows the separator when the config's `[targets]`
+routes that path. A plain `peek` reads the drain's replay state to know
+what's undelivered, and redb lets only one process have that open, so
+beside a running `drain` use `peek --all`.
+
 Replay state (attempt counts, backoff) is client-local in redb, keyed by
 event id — a replay target being down (consumer not running) just means
 backoff and retry; the events are already durable.
