@@ -198,7 +198,7 @@
 
   <div class="callout">
     <b>One keypair, one tunnel.</b> The <b>server</b> has a keypair; it signs every webhook event,
-    and the drain pins its pubkey as <code>server_pubkey</code>, acting only on events it signed. The
+    and the drain holds a copy of it (<code>server_nsec_path</code>), acting only on events it signed. The
     relay itself has no auth and accepts writes, so it listens on localhost and the drain reaches it
     through a tunnel (<code>ssh -L</code>, Tailscale, WireGuard). Only ingest is public.
   </div>
@@ -231,7 +231,7 @@
 
 <span class="p">$</span> umask 077
 <span class="p">$</span> hookstr keygen | awk '/nsec/{print $2}' &gt; /var/lib/hookstr/server.nsec</code></pre>
-  <div class="caption">hookstrd also logs this pubkey at startup. It's the drain's <code>server_pubkey</code>.</div>
+  <div class="caption">Copy this file to the drain machine too; the drain's <code>server_nsec_path</code> points at it.</div>
 
   <h3>2 — Write <code>hookstrd.toml</code></h3>
   <p>Every key but <code>relay_addr</code> is required. See <a href="#config-ref">§09</a> for the full table.</p>
@@ -249,7 +249,6 @@
 
   <h3>3 — Run it</h3>
   <pre><code><span class="p">$</span> hookstrd --config /etc/hookstr/hookstrd.toml
-<span class="o">server pubkey 8f2a… (the drain's server_pubkey)</span>
 <span class="o">hookstrd ingest on 127.0.0.1:8080, relay on ws://127.0.0.1:8081</span></code></pre>
   <p><code>--config</code> defaults to <code>hookstrd.toml</code> in the working directory. Set
     <code>RUST_LOG=info</code> (or <code>debug</code>) for logs. A minimal systemd unit:</p>
@@ -308,7 +307,8 @@
   <h3>2 — <code>hookstr init</code></h3>
   <p>First-run setup: writes a starter config. Pass the relay URL as the tunnel exposes it (default
     <code>ws://127.0.0.1:8081</code>) and the server's pubkey from <a href="#server">§03</a>:</p>
-  <pre><code><span class="p">$</span> hookstr init ws://127.0.0.1:8081 --server-pubkey 8f2a…
+  <pre><code><span class="p">$</span> scp hooks.example.com:/var/lib/hookstr/server.nsec ~/.config/hookstr/
+<span class="p">$</span> hookstr init ws://127.0.0.1:8081 --server-nsec-path ~/.config/hookstr/server.nsec
 <span class="o">wrote config /home/you/.config/hookstr/config.toml</span>
 <span class="o">then: hookstr drain --target http://localhost:3000/webhooks</span></code></pre>
   <p>The config lands at <code>$XDG_CONFIG_HOME/hookstr/config.toml</code> (falling back to
@@ -322,7 +322,7 @@
     step), specific to the consumer it feeds rather than to the sync relationship the config
     describes.</p>
   <pre><code><span class="p">relay_url</span>     = <span class="s">"ws://127.0.0.1:8081"</span>
-<span class="p">server_pubkey</span> = <span class="s">"8f2a…"</span>
+<span class="p">server_nsec_path</span> = <span class="s">"/home/you/.config/hookstr/server.nsec"</span>
 <span class="p">db_path</span>       = <span class="s">"/home/you/.local/share/hookstr/ndb"</span>
 <span class="p">redb_path</span>     = <span class="s">"/home/you/.local/share/hookstr/replays.redb"</span></code></pre>
 
@@ -389,9 +389,9 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
     <tr><th>Command</th><th>Args / flags</th><th>What it does</th></tr>
     <tr>
       <td><code>init [relay_url]</code></td>
-      <td><code>--server-pubkey &lt;hex&gt;</code>, <code>--config &lt;path&gt;</code></td>
+      <td><code>--server-nsec-path &lt;path&gt;</code>, <code>--config &lt;path&gt;</code></td>
       <td>First-run setup: write a starter config. <code>relay_url</code> defaults to
-        <code>ws://127.0.0.1:8081</code>; <code>server_pubkey</code> is a placeholder until set.</td>
+        <code>ws://127.0.0.1:8081</code>; <code>server_nsec_path</code> is a placeholder until set.</td>
     </tr>
     <tr>
       <td><code>drain [providers…]</code></td>
@@ -437,7 +437,7 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
         writes: keep it on localhost and reach it by tunnel, never through the proxy.</td></tr>
     <tr><td><code>nsec_path</code></td><td><span class="req">required</span></td>
       <td>Path to a file holding the server <code>nsec</code>. The key signs every webhook event; its
-        pubkey is the drain's <code>server_pubkey</code>.</td></tr>
+        drain keeps a copy at its <code>server_nsec_path</code>.</td></tr>
     <tr><td><code>[ingest_tokens]</code></td><td><span class="req">required</span></td>
       <td>Table of <code>provider = "token"</code>. Values must be unique. Keep it last in the file.</td></tr>
   </table></div>
@@ -447,8 +447,8 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
     <tr><th>Key</th><th></th><th>Meaning</th></tr>
     <tr><td><code>relay_url</code></td><td><span class="req">required</span></td>
       <td>hookstrd's relay as the tunnel exposes it, e.g. <code>ws://127.0.0.1:8081</code>.</td></tr>
-    <tr><td><code>server_pubkey</code></td><td><span class="req">required</span></td>
-      <td>hookstrd's 64-char hex pubkey. Only events it signed are synced or replayed.</td></tr>
+    <tr><td><code>server_nsec_path</code></td><td><span class="req">required</span></td>
+      <td>A copy of hookstrd's nsec file. Only events signed by that key are synced or replayed.</td></tr>
     <tr><td><code>db_path</code></td><td><span class="req">required</span></td>
       <td>Local mirror nostrdb — negentropy needs the full local set here.</td></tr>
     <tr><td><code>redb_path</code></td><td><span class="req">required</span></td>
@@ -478,7 +478,7 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
     <tr><td>someone reaches the relay</td><td>It has no auth: they can read every stored webhook. Keep
       <code>relay_addr</code> on localhost and behind a tunnel.</td></tr>
     <tr><td>events pushed into the relay</td><td>Stored, but never synced or replayed: the drain only
-      acts on events signed by <code>server_pubkey</code>.</td></tr>
+      acts on events signed by the key in <code>server_nsec_path</code>.</td></tr>
     <tr><td>ingest URL leaks</td><td>Rotate that provider's token, restart, re-register. Others
       unaffected.</td></tr>
   </table></div>

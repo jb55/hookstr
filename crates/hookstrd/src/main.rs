@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&cfg.db_path)?;
     let ndb = Ndb::new(&cfg.db_path, &Config::new().set_mapsize(cfg.mapsize))?;
 
-    let (seckey, pubkey) = cfg.keys()?;
+    let seckey = cfg.seckey()?;
     let ingest = Ingest {
         ndb: ndb.clone(),
         seckey,
@@ -27,8 +27,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Held for the process lifetime; dropping it stops the relay.
     let _relay = hookstrd::spawn_relay(ndb, cfg.relay_addr)?;
-    // The drain pins this as `server_pubkey` and acts only on events it signed.
-    tracing::info!("server pubkey {pubkey} (the drain's server_pubkey)");
 
     let listener = tokio::net::TcpListener::bind(ingest_addr).await?;
     tracing::info!(

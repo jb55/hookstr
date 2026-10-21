@@ -7,8 +7,8 @@ ingest_addr = "127.0.0.1:8080"
 # writes, so keep it on localhost (the default) and reach it over a tunnel;
 # never put it behind the public proxy.
 relay_addr = "127.0.0.1:8081"
-# Signs every webhook event. Its pubkey (logged at startup) is the drain's
-# server_pubkey.
+# Signs every webhook event. Copy this file to the drain machine and point
+# the drain's server_nsec_path at it.
 nsec_path = "/var/lib/hookstr/server.nsec"
 
 # Per-provider ingest secrets: {provider} -> long random token. The token

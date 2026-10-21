@@ -79,14 +79,14 @@ impl HookstrdConfig {
         }
     }
 
-    /// The server keypair as (seckey, hex pubkey). The key signs every
-    /// webhook event; the pubkey is what the drain pins as `server_pubkey`.
-    pub fn keys(&self) -> anyhow::Result<([u8; 32], String)> {
+    /// The server key. It signs every webhook event; the drain trusts only
+    /// events signed by it (via a copy at its `server_nsec_path`).
+    pub fn seckey(&self) -> anyhow::Result<[u8; 32]> {
         let nsec = std::fs::read_to_string(&self.nsec_path)
             .with_context(|| format!("reading nsec from {}", self.nsec_path))?;
-        let (seckey, pubkey) = nostrdb_net::relay::sync::parse_nsec(nsec.trim())
+        let (seckey, _pubkey) = nostrdb_net::relay::sync::parse_nsec(nsec.trim())
             .map_err(|e| anyhow::anyhow!("{}: {e}", self.nsec_path))?;
-        Ok((seckey, pubkey.hex()))
+        Ok(seckey)
     }
 }
 

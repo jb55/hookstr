@@ -7,9 +7,10 @@
 # hookstrd's relay has no auth, so it listens on localhost only; reach it over
 # a tunnel, e.g. `ssh -NL 8081:127.0.0.1:8081 hooks.example.com`.
 relay_url = "ws://127.0.0.1:8081"
-# hookstrd's pubkey (it logs it at startup). Only events it signed are synced
-# or replayed, so events anyone else pushes into the relay are ignored.
-server_pubkey = "CHANGE-ME"
+# A copy of hookstrd's nsec file (its nsec_path). Only events signed by that
+# key are synced or replayed, so events anyone else pushes into the relay are
+# ignored.
+server_nsec_path = "/var/lib/hookstr-cli/server.nsec"
 db_path = "/var/lib/hookstr-cli/ndb"
 redb_path = "/var/lib/hookstr-cli/replays.redb"
 

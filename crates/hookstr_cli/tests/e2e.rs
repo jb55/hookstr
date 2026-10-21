@@ -24,12 +24,8 @@ const TOKEN: &str = "test-ingest-token";
 /// headers, and the raw body.
 type Delivery = (String, HashMap<String, String>, Vec<u8>);
 
-fn pubkey(secret: &[u8; 32]) -> [u8; 32] {
-    secp256k1::SecretKey::from_slice(secret)
-        .expect("seckey")
-        .x_only_public_key(&secp256k1::Secp256k1::new())
-        .0
-        .serialize()
+fn nsec(secret: &[u8; 32]) -> String {
+    bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked("nsec"), secret).expect("bech32")
 }
 
 /// The whole deployment, minus the CLI: the real hookstrd ingest server and
@@ -85,18 +81,22 @@ impl World {
         let target_port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, target).await.unwrap() });
 
+        // The drain's copy of hookstrd's nsec file.
+        let server_nsec_path = tmp.path().join("server.nsec");
+        std::fs::write(&server_nsec_path, format!("{}\n", nsec(&SERVER_SECRET))).expect("nsec");
+
         let target_url = format!("http://127.0.0.1:{target_port}/hook");
         let cfg_path = tmp.path().join("hookstr.toml");
         std::fs::write(
             &cfg_path,
             format!(
                 r#"relay_url = "{}"
-server_pubkey = "{}"
+server_nsec_path = "{}"
 db_path = "{}"
 redb_path = "{}"
 "#,
                 relay.url(),
-                hex::encode(pubkey(&SERVER_SECRET)),
+                server_nsec_path.display(),
                 tmp.path().join("cli-db").display(),
                 tmp.path().join("replay.redb").display(),
             ),
@@ -413,7 +413,7 @@ async fn init_writes_config_once() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let init = |relay: &'static str| {
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_hookstr"));
-        cmd.args(["init", relay, "--server-pubkey", "ab".repeat(32).as_str()])
+        cmd.args(["init", relay, "--server-nsec-path", "/keys/server.nsec"])
             .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
             .env("XDG_DATA_HOME", tmp.path().join("data"));
         async move { cmd.output().await.expect("init runs") }
@@ -432,7 +432,7 @@ async fn init_writes_config_once() {
         "{cfg}"
     );
     assert!(
-        cfg.contains(&format!(r#"server_pubkey = "{}""#, "ab".repeat(32))),
+        cfg.contains(r#"server_nsec_path = "/keys/server.nsec""#),
         "{cfg}"
     );
 

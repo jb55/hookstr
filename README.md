@@ -54,8 +54,8 @@ webhook, eventually, in order, with valid signatures.
   so even a million deliveries is single-digit GB.
 - **Pull-only, trusting one key.** The relay has no auth and will store
   any event a client sends it, so it binds to localhost and the drain
-  reaches it through a tunnel. The drain pins hookstrd's pubkey
-  (`server_pubkey`): it syncs and replays only events hookstrd signed, so
+  reaches it through a tunnel. The drain holds a copy of hookstrd's key
+  (`server_nsec_path`): it syncs and replays only events signed by it, so
   anything else pushed into the relay is never acted on. On the client,
   replay only acts on notes read back out of the local nostrdb after its
   ingester has verified and committed them — never on wire frames.
@@ -70,8 +70,8 @@ one `header` tag per preserved header. Schema lives in
 
 ### Server (the always-online box)
 
-Generate a keypair for the server. Its pubkey is what the drain pins as
-`server_pubkey`:
+Generate a keypair for the server. The drain gets a copy of the same
+nsec file:
 
 ```
 $ hookstr keygen
@@ -114,7 +114,6 @@ still sets it fails at startup and says to rename it to `ingest_addr`.
 
 ```
 $ hookstrd --config hookstrd.toml
-INFO server pubkey 8f2a… (the drain's server_pubkey)
 INFO hookstrd ingest on 127.0.0.1:8080, relay on ws://127.0.0.1:8081
 ```
 
@@ -136,11 +135,12 @@ $ ssh -NL 8081:127.0.0.1:8081 hooks.example.com
 
 `hookstr init` writes a starter `~/.config/hookstr/config.toml`, with the
 local mirror db under `~/.local/share/hookstr/`. Give it the relay URL as
-the tunnel exposes it (default `ws://127.0.0.1:8081`) and hookstrd's
-pubkey:
+the tunnel exposes it (default `ws://127.0.0.1:8081`) and a copy of
+hookstrd's nsec file:
 
 ```
-$ hookstr init ws://127.0.0.1:8081 --server-pubkey 8f2a…
+$ scp hooks.example.com:/var/lib/hookstr/server.nsec ~/.config/hookstr/
+$ hookstr init ws://127.0.0.1:8081 --server-nsec-path ~/.config/hookstr/server.nsec
 wrote config /home/you/.config/hookstr/config.toml
 then: hookstr drain --target http://localhost:3000/webhooks
 ```
@@ -211,7 +211,7 @@ backoff and retry; the events are already durable.
 | duplicate provider deliveries | distinct events; consumer dedupes on its delivery id |
 | replay target down | redb retry state + backoff; events are already durable |
 | someone reaches the relay | it has no auth: they can read every stored webhook. Keep `relay_addr` on localhost and behind a tunnel |
-| events pushed into the relay | stored, but never synced or replayed: the drain only acts on events signed by `server_pubkey` |
+| events pushed into the relay | stored, but never synced or replayed: the drain only acts on events signed by the key in `server_nsec_path` |
 | ingest URL leaks | rotate the path token, re-register with providers |
 
 ## Crates

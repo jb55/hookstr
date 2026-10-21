@@ -10,8 +10,9 @@
 //! verifies before committing. Everything we act on — including the realtime
 //! notifications in follow mode — is read back out of the local nostrdb, so
 //! replay never trusts a wire frame. The relay has no auth and accepts writes,
-//! so every filter is pinned to `server_pubkey`: only events hookstrd itself
-//! signed are ever synced or acted on.
+//! so every filter is pinned to hookstrd's pubkey (derived from
+//! `server_nsec_path`): only events hookstrd itself signed are ever synced or
+//! acted on.
 //!
 //! `peek` runs the same sync but prints deliveries instead of replaying them,
 //! and never writes replay state.
@@ -91,10 +92,10 @@ enum Command {
         /// hookstrd's relay endpoint as the drain reaches it, usually through
         /// a tunnel (default: ws://127.0.0.1:8081).
         relay_url: Option<String>,
-        /// hookstrd's hex pubkey, which it logs at startup (placeholder
-        /// written if omitted; the drain refuses to start until it's set).
+        /// Path to a copy of hookstrd's nsec file (placeholder written if
+        /// omitted; the drain refuses to start until it points at one).
         #[arg(long)]
-        server_pubkey: Option<String>,
+        server_nsec_path: Option<String>,
         /// Where to write the TOML config file
         /// (default: $XDG_CONFIG_HOME/hookstr/config.toml).
         #[arg(long)]
@@ -122,8 +123,8 @@ enum Command {
         /// Empty = all.
         providers: Vec<String>,
     },
-    /// Generate a keypair, for hookstrd's nsec_path. Its pubkey is the
-    /// drain's server_pubkey.
+    /// Generate a keypair, for hookstrd's nsec_path (and a copy at the
+    /// drain's server_nsec_path).
     Keygen,
 }
 
@@ -170,9 +171,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Init {
             relay_url,
-            server_pubkey,
+            server_nsec_path,
             config,
-        } => init(relay_url, server_pubkey, config),
+        } => init(relay_url, server_nsec_path, config),
         Command::Keygen => keygen(),
     }
 }
@@ -197,7 +198,7 @@ fn keygen() -> anyhow::Result<()> {
 
 fn init(
     relay_url: Option<String>,
-    server_pubkey: Option<String>,
+    server_nsec_path: Option<String>,
     config: Option<String>,
 ) -> anyhow::Result<()> {
     let cfg_path = match config {
@@ -218,7 +219,7 @@ fn init(
     std::fs::create_dir_all(&data_dir)?;
 
     let relay_url = relay_url.unwrap_or_else(|| "ws://127.0.0.1:8081".to_owned());
-    let server_pubkey = server_pubkey.unwrap_or_else(|| "CHANGE-ME".to_owned());
+    let server_nsec_path = server_nsec_path.unwrap_or_else(|| "CHANGE-ME".to_owned());
     std::fs::write(
         &cfg_path,
         format!(
@@ -228,9 +229,9 @@ fn init(
 # hookstrd's relay has no auth, so it listens on localhost only; reach it
 # over a tunnel, e.g. `ssh -NL 8081:127.0.0.1:8081 hooks.example.com`.
 relay_url = "{relay_url}"
-# hookstrd's pubkey (it logs it at startup). Only events it signed are
-# synced or replayed.
-server_pubkey = "{server_pubkey}"
+# A copy of hookstrd's nsec file (its nsec_path). Only events signed by that
+# key are synced or replayed.
+server_nsec_path = "{server_nsec_path}"
 db_path = "{db}"
 redb_path = "{redb}"
 
@@ -250,8 +251,8 @@ redb_path = "{redb}"
         ),
     )?;
     println!("wrote config {}", cfg_path.display());
-    if server_pubkey == "CHANGE-ME" {
-        println!("set its server_pubkey to the pubkey hookstrd logs at startup");
+    if server_nsec_path == "CHANGE-ME" {
+        println!("set its server_nsec_path to a copy of hookstrd's nsec file");
     }
     println!("then: hookstr drain --target http://localhost:3000/webhooks");
     Ok(())

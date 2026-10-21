@@ -18,10 +18,10 @@ pub struct DrainConfig {
     pub db_path: String,
     /// Replay bookkeeping (event id -> status/attempts/next_retry).
     pub redb_path: String,
-    /// hookstrd's hex pubkey (it logs it at startup). Every sync and local
-    /// query is pinned to it, so events anyone else pushes into the
-    /// unauthenticated relay are never synced or replayed.
-    pub server_pubkey: String,
+    /// File holding hookstrd's nsec (a copy of its `nsec_path`). Every sync
+    /// and local query is pinned to its pubkey, so events anyone else pushes
+    /// into the unauthenticated relay are never synced or replayed.
+    pub server_nsec_path: String,
     /// Default replay base for this run, from `--target` (not the config
     /// file — where a drain delivers is specific to the consumer it feeds,
     /// not to the durable sync relationship the config describes). The
@@ -58,16 +58,13 @@ impl DrainConfig {
             .map(|base| format!("{}/{path}", base.trim_end_matches('/')))
     }
 
+    /// hookstrd's pubkey, derived from the nsec in `server_nsec_path`.
     pub fn server_pubkey(&self) -> anyhow::Result<[u8; 32]> {
-        hex::decode(&self.server_pubkey)
-            .ok()
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "server_pubkey must be hookstrd's 64-char hex pubkey (it logs it at startup), got {:?}",
-                    self.server_pubkey
-                )
-            })
+        let nsec = std::fs::read_to_string(&self.server_nsec_path)
+            .with_context(|| format!("reading hookstrd's nsec from {}", self.server_nsec_path))?;
+        let (_seckey, pubkey) = nostrdb_net::relay::sync::parse_nsec(nsec.trim())
+            .map_err(|e| anyhow::anyhow!("{}: {e}", self.server_nsec_path))?;
+        Ok(*pubkey.bytes())
     }
 }
 
