@@ -117,7 +117,8 @@ redb_path = "{}"
 
     fn drain_cmd(&self) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_hookstr"));
-        cmd.args(["drain", "--config", self.cfg_path.to_str().unwrap()])
+        // Every test webhook comes in on the "acme" ingest token.
+        cmd.args(["drain", "--config", self.cfg_path.to_str().unwrap(), "acme"])
             .current_dir(self.tmp.path());
         cmd
     }
@@ -809,4 +810,30 @@ async fn exec_tuning_flags_need_exec() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test]
+async fn drain_without_providers_is_refused() {
+    let world = World::start().await;
+    world.ingest_all(&["unclaimed"]).await;
+
+    // No positional providers would match every provider in the store, so
+    // clap refuses before anything is synced or delivered.
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_hookstr"))
+        .args(["drain", "--config", world.cfg_path.to_str().unwrap()])
+        .args(["--once", "--target", &world.target_url])
+        .output()
+        .await
+        .expect("drain spawns");
+    assert!(
+        !output.status.success(),
+        "a drain with no providers must not run"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("<PROVIDERS>..."),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut world = world;
+    assert!(world.deliveries.try_recv().is_err(), "nothing delivered");
 }

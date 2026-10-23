@@ -308,7 +308,7 @@
     <code>ws://127.0.0.1:8081</code>):</p>
   <pre><code><span class="p">$</span> hookstr init ws://127.0.0.1:8081
 <span class="o">wrote config /home/you/.config/hookstr/config.toml</span>
-<span class="o">then: hookstr drain --target http://localhost:3000/webhooks</span></code></pre>
+<span class="o">then: hookstr drain --target http://localhost:3000/webhooks &lt;provider&gt;</span></code></pre>
   <p>The config lands at <code>$XDG_CONFIG_HOME/hookstr/config.toml</code> (falling back to
     <code>~/.config/hookstr/</code>); the local mirror db and replay state go under
     <code>~/.local/share/hookstr/</code>. <code>init</code> refuses to overwrite an existing
@@ -323,7 +323,7 @@
 <span class="p">redb_path</span> = <span class="s">"/home/you/.local/share/hookstr/replays.redb"</span></code></pre>
 
   <h3>4 — <code>hookstr drain</code></h3>
-  <pre><code><span class="p">$</span> hookstr drain --target http://localhost:3000/webhooks
+  <pre><code><span class="p">$</span> hookstr drain --target http://localhost:3000/webhooks acme
 <span class="o">synced 42 missing webhook event(s)</span>
 <span class="o">drain complete: 42 replayed, 0 failed, 0 with no target (42 stored total)</span>
 <span class="o">following: handling new webhooks as they arrive</span></code></pre>
@@ -337,8 +337,10 @@
     <tr><td><code>--once</code></td>
       <td>Catch up + replay, then <strong>exit</strong> instead of following. Cron-style.</td></tr>
     <tr><td><code>acme stripe</code> <span class="opt">(positional)</span></td>
-      <td>Scope to specific providers (matched on the indexed <code>t</code> tag). Empty = all — so
-        one hookstrd feeds several consumers, each a scoped drain with its own <code>--target</code>.</td></tr>
+      <td><strong>Required</strong>, one or more: the providers to drain (matched on the indexed
+        <code>t</code> tag). A drain with none refuses to start rather than deliver every
+        consumer's webhooks. So one hookstrd feeds several consumers, each a scoped drain with its
+        own <code>--target</code>.</td></tr>
     <tr><td><code>[targets]</code> <span class="opt">(in config)</span></td>
       <td>Pin specific ingest paths to other consumers; these win over <code>--target</code>
         (<a href="#routing">§07</a>).</td></tr>
@@ -403,14 +405,14 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
         <code>ws://127.0.0.1:8081</code>.</td>
     </tr>
     <tr>
-      <td><code>drain [providers…]</code></td>
+      <td><code>drain &lt;providers…&gt;</code></td>
       <td><code>--once</code>, <code>--target &lt;url&gt;</code>, <code>--exec &lt;cmd&gt;</code>,
         <code>--batch-max &lt;n&gt;</code>, <code>--batch-window &lt;dur&gt;</code>,
         <code>--exec-timeout &lt;dur&gt;</code>, <code>--config &lt;path&gt;</code></td>
       <td>Sync, replay the backlog, then follow. <code>--target</code> sets the replay base
         (deliveries POST to <code>{target}/{path}</code>); <code>--exec</code> delivers batches of
         NDJSON envelopes to a command instead, its exit code the ack; <code>--once</code> exits after
-        catch-up; positional providers scope by <code>t</code> tag.</td>
+        catch-up; one or more positional providers (required) scope by <code>t</code> tag.</td>
     </tr>
     <tr>
       <td><code>peek [providers…]</code></td>

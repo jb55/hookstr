@@ -110,8 +110,11 @@ enum Command {
         #[arg(long, default_value_t = replay_state::BACKOFF_BASE_SECS, hide = true)]
         retry_base_secs: u64,
         /// Providers to drain, matched on each event's indexed `t` tag (the
-        /// provider names from hookstrd's [ingest_tokens]). Empty = all;
-        /// run one drain per consumer, each scoped to what it handles.
+        /// provider names from hookstrd's [ingest_tokens]). At least one is
+        /// required: an empty list would match every provider, so a bare
+        /// `drain` would deliver (and ack) webhooks meant for other
+        /// consumers. Run one drain per consumer, scoped to what it handles.
+        #[arg(required = true, num_args = 1..)]
         providers: Vec<String>,
     },
     /// First-run setup: write a starter config under ~/.config/hookstr/,
@@ -276,7 +279,7 @@ redb_path = "{redb}"
 
 # Where deliveries replay is a per-run flag, not config, since it's specific
 # to whichever consumer this drain feeds:
-#   hookstr drain --target http://localhost:3000/webhooks
+#   hookstr drain --target http://localhost:3000/webhooks <provider>
 # Deliveries are self-describing, so a delivery ingested at
 # /ingest/<token>/acme/events then replays to {{target}}/acme/events.
 #
@@ -290,7 +293,7 @@ redb_path = "{redb}"
         ),
     )?;
     println!("wrote config {}", cfg_path.display());
-    println!("then: hookstr drain --target http://localhost:3000/webhooks");
+    println!("then: hookstr drain --target http://localhost:3000/webhooks <provider>");
     Ok(())
 }
 

@@ -138,7 +138,7 @@ the tunnel exposes it (default `ws://127.0.0.1:8081`):
 ```
 $ hookstr init ws://127.0.0.1:8081
 wrote config /home/you/.config/hookstr/config.toml
-then: hookstr drain --target http://localhost:3000/webhooks
+then: hookstr drain --target http://localhost:3000/webhooks <provider>
 ```
 
 You point the drain at your local consumer with `--target` (below), not
@@ -153,23 +153,25 @@ per-path overrides for consumers whose routes don't mirror the ingest path
 option. A drain with neither `--target` nor a `[targets]` entry has nowhere
 to deliver and refuses to start.
 
-Then drain:
+Then drain, naming the providers this consumer handles (the provider
+names from hookstrd's `[ingest_tokens]`):
 
 ```
-$ hookstr drain --target http://localhost:3000/webhooks
+$ hookstr drain --target http://localhost:3000/webhooks acme
 ```
 
 This negentropy-syncs the missed backlog, replays it oldest-first, and
 then follows — each new webhook replays in under a second while the
 connection is up, and a dropped connection reconnects and re-syncs on
 its own. Pass `--once` to exit after the
-catch-up replay instead (cron-style). Positional args scope the drain
-to specific providers (`hookstr drain --target … acme stripe`; empty =
-all) — so one hookstrd serves several consumers, each running its own
-scoped drain with its own `--target`:
+catch-up replay instead (cron-style). The positional providers are
+required: one or more (`hookstr drain --target … acme stripe`). A drain
+with none refuses to start, since it would deliver, and mark delivered,
+webhooks meant for every other consumer. So one hookstrd serves several
+consumers, each running its own scoped drain with its own `--target`:
 
 ```
-$ hookstr drain --target http://localhost:3003 acme
+$ hookstr drain --target http://localhost:3003 stripe
 ```
 
 To look at webhooks without delivering them, use `hookstr peek`. It

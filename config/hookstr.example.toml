@@ -13,7 +13,7 @@ redb_path = "/var/lib/hookstr-cli/replays.redb"
 
 # Where deliveries replay is a per-run flag, not config, since it's specific to
 # whichever consumer this drain feeds:
-#   hookstr drain --target http://localhost:3000/webhooks
+#   hookstr drain --target http://localhost:3000/webhooks <provider>
 # Deliveries are self-describing: the event's path tag mirrors everything after
 # the token in the ingest URL, so a delivery ingested at
 # /ingest/<token>/acme/events replays to {--target}/acme/events.
