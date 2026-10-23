@@ -193,6 +193,117 @@ routes that path. A plain `peek` reads the drain's replay state to know
 what's undelivered, and redb lets only one process have that open, so
 beside a running `drain` use `peek --all`.
 
+`peek --json` prints one JSON envelope per line instead (the format is
+under [Envelope format](#envelope-format)), the same lines `drain --exec`
+feeds its command, so `hookstr peek --all --json | ./consumer` tries a
+consumer out on everything stored without acking anything.
+
+### Delivering to a command: `drain --exec`
+
+A consumer doesn't have to be an HTTP server. With `--exec <cmd>` in
+place of `--target`, the drain runs a command per batch of webhooks and
+uses its exit code as the ack, with the same sync, backfill, ordering,
+retries and replay state as a URL drain:
+
+```
+$ hookstr drain --config ~/.config/hookstr/notify.toml --exec ./notify.py gitlab
+```
+
+- **Invocation.** `<cmd>` runs under `sh -c`, once per batch, from the
+  drain's working directory. The batch is on its **stdin**, closed after
+  the last line. The command's stdout and stderr are the drain's.
+- **stdin** is [NDJSON envelopes](#envelope-format), one per line,
+  oldest first by receipt time. A batch is never empty.
+- **`HOOKSTR_PHASE`** is `backfill` while the drain catches up on what
+  was stored before it started, and `live` from then on, for webhooks
+  arriving while it follows. A backfill batch can hold hundreds of old
+  webhooks, so it's the place to summarize instead of alerting per event.
+  It switches to `live` once one pass has delivered everything due with
+  no failure; a backfill batch that fails retries as `backfill`. It is
+  the only variable hookstr sets. Headers stay in the envelope and never
+  go in the environment, since stored headers can hold secrets (e.g.
+  `x-gitlab-token`) and the environment leaks into child processes and
+  `ps`.
+- **Ack.** Exit 0 acks the whole batch: every webhook in it is marked
+  replayed and never sent again. A non-zero exit, a crash, or running
+  past `--exec-timeout` (the command is killed) fails the whole batch.
+  Every webhook in it backs off (30s, doubling per failed attempt, up to
+  about an hour) and then goes out again in a later batch. There is no
+  partial ack. A consumer must be idempotent (dedupe on `id`, or on the
+  provider's delivery-id header), which at-least-once delivery requires
+  anyway.
+- **Ordering.** Batches run one at a time, never concurrently. A failed
+  batch stops the pass, so nothing behind it goes out until it retries.
+  But once its backoff is running, newer webhooks that arrive are
+  delivered while it waits. So a retried batch can come after webhooks
+  received later; sort on `received_at_ms` if order matters.
+- **Batching.** `--batch-max N` (default 500) caps a batch. While
+  following, `--batch-window <dur>` (default `2s`) gathers whatever
+  arrives within that long of the first arrival into one batch, since
+  one provider action often fires several hooks at once. The window is
+  fixed from the first arrival, so a steady trickle can't hold a batch
+  back. `--exec-timeout <dur>` (default `60s`) bounds each run.
+  Durations take `ms`, `s`, `m` or `h`, or bare seconds. These three
+  flags are only valid with `--exec`.
+- `--exec` and `--target` are mutually exclusive, and an exec drain
+  ignores the config's `[targets]`. `--once` and positional providers work
+  as for any drain. `--once` makes one catch-up pass and stops at the
+  first failed batch. Like a URL drain, it exits 0 even then, and the log
+  says what failed.
+
+Replay state is keyed by event id alone, not per consumer, and the drain
+holds the redb file for the life of the run. So give an exec drain its
+own config file with its own `redb_path` and `db_path`. Sharing them with
+a URL drain would let whichever consumer acks a webhook first mark it
+delivered for the other, and the second drain on one redb file fails to
+start anyway.
+
+#### Envelope format
+
+Each line is one compact JSON object followed by `\n`. A line never
+contains a raw newline (one inside a string is escaped). Keys come in
+this order, and a consumer should ignore keys it doesn't know:
+
+| key | type | meaning |
+|---|---|---|
+| `id` | string | The webhook's nostr event id, 64 lowercase hex chars. Stable across retries and across `peek`: the dedupe key. |
+| `path` | string | Everything after the token in the ingest URL, e.g. `gitlab/events`. |
+| `received_at_ms` | integer | When hookstrd received it, unix milliseconds. |
+| `provider` | string | The provider name the ingest token is registered under in hookstrd's `[ingest_tokens]`, e.g. `gitlab`. What positional providers match. |
+| `headers` | object | The preserved request headers, names lowercased, in request order. Values are strings. A repeated header name has its values joined with `", "`. hookstrd has already dropped hop-by-hop, framing (`host`, `content-length`, …) and reverse-proxy (`x-forwarded-*`, `x-real-ip`) headers. |
+| `body` | any | The request body, carried as `body_encoding` says. |
+| `body_encoding` | string | `"json"`: the body parsed as JSON and `body` is that value (object, array, string, number, bool or null). `"utf8"`: not JSON but valid UTF-8, and `body` is the text as a string. `"base64"`: neither, and `body` is standard base64 (with padding) of the raw bytes. |
+
+A `"json"` body is the parsed value, re-serialized. Its key order is
+kept, but whitespace is not, and a number too big for a 64-bit integer
+or a double loses precision. A consumer that has to verify an HMAC over
+the exact raw bytes should take a URL drain, which replays the body
+byte-exact. A JSON string body (`"hi"`) is `body_encoding: "json"`,
+which is how it is told apart from the bare text `hi` (`"utf8"`).
+
+An example line, wrapped here for reading:
+
+```json
+{"id":"5f3c…","path":"gitlab/events","received_at_ms":1761040000000,
+ "provider":"gitlab","headers":{"content-type":"application/json",
+ "x-gitlab-event":"Push Hook","x-gitlab-token":"…"},
+ "body":{"object_kind":"push","ref":"refs/heads/main"},"body_encoding":"json"}
+```
+
+A minimal consumer:
+
+```python
+#!/usr/bin/env python3
+import json, os, sys
+events = [json.loads(line) for line in sys.stdin]
+if os.environ["HOOKSTR_PHASE"] == "backfill":
+    print(f"{len(events)} webhooks while you were away")
+else:
+    for e in events:
+        print(e["path"], e["headers"].get("x-gitlab-event"))
+# exiting 0 acks the batch; raise or sys.exit(1) to have it retried
+```
+
 Replay state (attempt counts, backoff) is client-local in redb, keyed by
 event id — a replay target being down (consumer not running) just means
 backoff and retry; the events are already durable.
@@ -224,7 +335,8 @@ backoff and retry; the events are already durable.
 [`crates/hookstr_cli/tests/e2e.rs`](crates/hookstr_cli/tests/e2e.rs)
 spins up the real hookstrd router + relay in-process and drives the real
 drain binary — byte-exact replay (including a binary/base64 body), redb
-dedupe across runs, realtime follow, and peek.
+dedupe across runs, realtime follow, peek, and `drain --exec` batching,
+retries, timeouts and phases.
 
 Both crates pin [nostrdb-rs]'s `sync-progress` branch by git rev.
 

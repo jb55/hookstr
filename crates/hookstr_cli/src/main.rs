@@ -15,6 +15,9 @@
 //! `peek` runs the same sync but prints deliveries instead of replaying them,
 //! and never writes replay state.
 //!
+//! `drain --exec` delivers to a command instead of a URL, in batches; see
+//! [`exec`].
+//!
 //! Replay is at-least-once by design: the consumer dedupes on the provider's
 //! delivery-id header, so crash-mid-replay is always safe.
 
@@ -23,13 +26,15 @@ use futures_util::StreamExt;
 use hookstr_core::WebhookRecord;
 use nostrdb::{Config, Filter, Ndb, SubscriptionStream, Transaction};
 use nostrdb_net::relay::sync::Session;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod config;
+mod exec;
 mod replay_state;
 
 use config::DrainConfig;
-use replay_state::ReplayState;
+use exec::{Exec, Phase};
+use replay_state::{Due, ReplayState};
 
 /// Cap on the local replay query. Far above any realistic backlog; if it is
 /// ever hit, the next run picks up the rest.
@@ -75,6 +80,35 @@ enum Command {
         /// route purely via those.
         #[arg(long)]
         target: Option<String>,
+        /// Deliver to this command instead of POSTing to a target. It runs
+        /// under `sh -c` once per batch, with the batch on stdin as NDJSON
+        /// envelopes (one per line, oldest first; the same lines `peek
+        /// --json` prints) and HOOKSTR_PHASE=backfill|live in its
+        /// environment. Exit 0 acks the whole batch; a non-zero exit or a
+        /// timeout retries the whole batch after the replay backoff. Batches
+        /// run one at a time, in order. The config's [targets] aren't used.
+        #[arg(long, conflicts_with = "target")]
+        exec: Option<String>,
+        // The --exec tuning flags are Options, checked and defaulted below
+        // rather than with clap's `requires` (which a default value or the
+        // --target conflict can skip): a stray --batch-max must not quietly
+        // start a URL drain.
+        /// Most envelopes in one --exec batch [default: 500].
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        batch_max: Option<u32>,
+        /// While following, gather webhooks for this long after one arrives
+        /// and deliver them as one --exec batch (one provider action often
+        /// fires several hooks at once). E.g. 500ms, 2s, 1m [default: 2s].
+        #[arg(long, value_parser = exec::parse_duration)]
+        batch_window: Option<Duration>,
+        /// Kill an --exec run that takes longer than this and retry its
+        /// batch. E.g. 30s, 5m [default: 60s].
+        #[arg(long, value_parser = exec::parse_duration)]
+        exec_timeout: Option<Duration>,
+        /// Base of the retry backoff after a failed delivery, in seconds; it
+        /// doubles per failed attempt up to 2^7 times. For tests.
+        #[arg(long, default_value_t = replay_state::BACKOFF_BASE_SECS, hide = true)]
+        retry_base_secs: u64,
         /// Providers to drain, matched on each event's indexed `t` tag (the
         /// provider names from hookstrd's [ingest_tokens]). Empty = all;
         /// run one drain per consumer, each scoped to what it handles.
@@ -110,6 +144,11 @@ enum Command {
         /// next.
         #[arg(long)]
         all: bool,
+        /// Print one JSON envelope per line instead of the readable form:
+        /// exactly what `drain --exec` feeds its command, so `peek --all
+        /// --json | ./consumer` tries a consumer out.
+        #[arg(long)]
+        json: bool,
         /// Providers to show, matched on each event's indexed `t` tag.
         /// Empty = all.
         providers: Vec<String>,
@@ -136,28 +175,49 @@ async fn main() -> anyhow::Result<()> {
             config,
             once,
             target,
+            exec,
+            batch_max,
+            batch_window,
+            exec_timeout,
+            retry_base_secs,
             providers,
         } => {
+            anyhow::ensure!(
+                exec.is_some()
+                    || (batch_max.is_none() && batch_window.is_none() && exec_timeout.is_none()),
+                "--batch-max, --batch-window and --exec-timeout only apply with --exec"
+            );
             let mut cfg = DrainConfig::load(config.as_deref())?;
             cfg.providers = providers;
+            let state = ReplayState::open_with_backoff(&cfg.redb_path, retry_base_secs)?;
+            if let Some(cmd) = exec {
+                let exec = Exec {
+                    cmd,
+                    batch_max: batch_max.unwrap_or(500) as usize,
+                    batch_window: batch_window.unwrap_or(Duration::from_secs(2)),
+                    timeout: exec_timeout.unwrap_or(Duration::from_secs(60)),
+                };
+                return drain_exec(&cfg, &state, &exec, !once).await;
+            }
             cfg.target_base = target;
             // Nowhere to deliver = nothing to do. A bare --target or any
             // [targets] entry is enough; only the empty-both case is an error.
             anyhow::ensure!(
                 cfg.target_base.is_some() || !cfg.targets.is_empty(),
-                "no replay target: pass --target <url>, or add a [targets] entry to the config"
+                "no replay target: pass --target <url> or --exec <cmd>, or add a [targets] entry to the config"
             );
-            drain(cfg, !once).await
+            drain(cfg, state, !once).await
         }
         Command::Peek {
             config,
             follow,
             all,
+            json,
             providers,
         } => {
             let mut cfg = DrainConfig::load(config.as_deref())?;
             cfg.providers = providers;
-            peek(cfg, follow, all).await
+            peek(cfg, follow, all, json).await
         }
         Command::Init { relay_url, config } => init(relay_url, config),
         Command::Keygen => keygen(),
@@ -242,12 +302,15 @@ enum Mode<'a> {
         http: &'a reqwest::Client,
     },
     /// `peek`: print it. With a replay state, only deliveries a drain would
-    /// send next are printed; without one (`--all`), every one is.
-    Peek { state: Option<&'a ReplayState> },
+    /// send next are printed; without one (`--all`), every one is. `json`
+    /// prints [`exec::envelope`] lines instead of the readable form.
+    Peek {
+        state: Option<&'a ReplayState>,
+        json: bool,
+    },
 }
 
-async fn drain(cfg: DrainConfig, follow: bool) -> anyhow::Result<()> {
-    let state = ReplayState::open(&cfg.redb_path)?;
+async fn drain(cfg: DrainConfig, state: ReplayState, follow: bool) -> anyhow::Result<()> {
     let http = reqwest::Client::new();
     run(
         &cfg,
@@ -260,7 +323,7 @@ async fn drain(cfg: DrainConfig, follow: bool) -> anyhow::Result<()> {
     .await
 }
 
-async fn peek(cfg: DrainConfig, follow: bool, all: bool) -> anyhow::Result<()> {
+async fn peek(cfg: DrainConfig, follow: bool, all: bool, json: bool) -> anyhow::Result<()> {
     // --all never consults replay state, so it doesn't even open it. That
     // also makes it the one peek that works beside a running drain: redb
     // locks the file for whichever process opened it first.
@@ -278,27 +341,67 @@ async fn peek(cfg: DrainConfig, follow: bool, all: bool) -> anyhow::Result<()> {
         &cfg,
         &Mode::Peek {
             state: state.as_ref(),
+            json,
         },
         follow,
     )
     .await
 }
 
+/// The local mirror after the initial sync, plus, when following, the
+/// stream of new arrivals. Holds the sync session, which keeps syncing for
+/// as long as this lives.
+struct Synced {
+    ndb: Ndb,
+    incoming: Option<SubscriptionStream>,
+    _session: Session,
+}
+
 /// Sync the webhook set into the local mirror, handle the backlog, and in
 /// follow mode keep handling new arrivals until the process is stopped.
+async fn run(cfg: &DrainConfig, mode: &Mode<'_>, follow: bool) -> anyhow::Result<()> {
+    // Bind the session by name: `..` would drop it here and stop syncing.
+    let Synced {
+        ndb,
+        mut incoming,
+        _session,
+    } = sync(cfg, follow).await?;
+
+    handle_backlog(cfg, &ndb, mode).await?;
+
+    let Some(incoming) = incoming.as_mut() else {
+        return Ok(());
+    };
+    tracing::info!("following: handling new webhooks as they arrive");
+    while let Some(keys) = incoming.next().await {
+        // Resolve keys to ids in a scoped (non-Send) txn, then handle.
+        let ids: Vec<[u8; 32]> = {
+            let txn = Transaction::new(&ndb)?;
+            keys.iter()
+                .filter_map(|key| ndb.get_note_by_key(&txn, *key).ok().map(|note| *note.id()))
+                .collect()
+        };
+        for id in ids {
+            handle_event(cfg, &ndb, mode, &id).await?;
+        }
+    }
+    anyhow::bail!("local subscription ended")
+}
+
+/// Open the local mirror and run the initial sync.
 ///
 /// The sync [`Session`] owns the relay connection: a NIP-77 negentropy
 /// backfill of the webhook set (re-run on every reconnect, so gaps while
 /// disconnected are filled) plus, when following, a live REQ. It ingests into
 /// `ndb`; we only ever read back out of it.
-async fn run(cfg: &DrainConfig, mode: &Mode<'_>, follow: bool) -> anyhow::Result<()> {
+async fn sync(cfg: &DrainConfig, follow: bool) -> anyhow::Result<Synced> {
     std::fs::create_dir_all(&cfg.db_path)?;
     let ndb = Ndb::new(&cfg.db_path, &Config::new())?;
 
     // The local subscription goes up *before* the session starts syncing, so
     // no arrival can fall between the backlog pass and the follow loop. It
     // fires only for verified, committed notes.
-    let mut incoming = if follow {
+    let incoming = if follow {
         let sub = ndb.subscribe(&[webhook_filter(&cfg.providers)])?;
         Some(SubscriptionStream::new(ndb.clone(), sub).notes_per_await(1))
     } else {
@@ -334,26 +437,135 @@ async fn run(cfg: &DrainConfig, mode: &Mode<'_>, follow: bool) -> anyhow::Result
     } else if status.fetched > 0 {
         tracing::info!("synced {} missing webhook event(s)", status.fetched);
     }
+    Ok(Synced {
+        ndb,
+        incoming,
+        _session: session,
+    })
+}
 
-    handle_backlog(cfg, &ndb, mode).await?;
-
-    let Some(incoming) = incoming.as_mut() else {
-        return Ok(());
-    };
-    tracing::info!("following: handling new webhooks as they arrive");
-    while let Some(keys) = incoming.next().await {
-        // Resolve keys to ids in a scoped (non-Send) txn, then handle.
-        let ids: Vec<[u8; 32]> = {
-            let txn = Transaction::new(&ndb)?;
-            keys.iter()
-                .filter_map(|key| ndb.get_note_by_key(&txn, *key).ok().map(|note| *note.id()))
-                .collect()
+/// `drain --exec`: deliver everything due in batches, then, when following,
+/// deliver again whenever webhooks arrive or a failed batch's backoff ends.
+///
+/// Every pass re-reads what's due from the local mirror and replay state,
+/// so arrivals, retries and the backlog all go through the one path, oldest
+/// first. A failed batch ends its pass: later batches wait for the next one,
+/// which keeps them behind it. The phase is `backfill` until a pass
+/// delivers everything due without a failure, and `live` from then on.
+async fn drain_exec(
+    cfg: &DrainConfig,
+    state: &ReplayState,
+    exec: &Exec,
+    follow: bool,
+) -> anyhow::Result<()> {
+    let Synced {
+        ndb,
+        mut incoming,
+        _session,
+    } = sync(cfg, follow).await?;
+    let mut phase = Phase::Backfill;
+    loop {
+        let pass = exec_pass(cfg, &ndb, state, exec, phase).await?;
+        if phase == Phase::Backfill && !pass.failed {
+            phase = Phase::Live;
+            if follow {
+                tracing::info!("caught up; following: new webhooks go out as live batches");
+            }
+        }
+        let Some(incoming) = incoming.as_mut() else {
+            return Ok(());
         };
-        for id in ids {
-            handle_event(cfg, &ndb, mode, &id).await?;
+        let retry = async {
+            match pass.next_retry {
+                Some(at) => {
+                    tokio::time::sleep(Duration::from_secs(at.saturating_sub(now_s()))).await
+                }
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            keys = incoming.next() => {
+                anyhow::ensure!(keys.is_some(), "local subscription ended");
+                // Gather whatever else lands within the window into this
+                // batch. The window is fixed from the first arrival, so a
+                // steady trickle can't hold a batch back forever.
+                let deadline = tokio::time::Instant::now() + exec.batch_window;
+                while let Ok(Some(_)) = tokio::time::timeout_at(deadline, incoming.next()).await {}
+            }
+            () = retry => {}
         }
     }
-    anyhow::bail!("local subscription ended")
+}
+
+struct Pass {
+    /// A batch failed, ending the pass early.
+    failed: bool,
+    /// The earliest backoff deadline among failed deliveries, if any.
+    next_retry: Option<u64>,
+}
+
+/// Deliver everything due, oldest first, in batches of at most
+/// `exec.batch_max`, stopping at the first batch that fails.
+async fn exec_pass(
+    cfg: &DrainConfig,
+    ndb: &Ndb,
+    state: &ReplayState,
+    exec: &Exec,
+    phase: Phase,
+) -> anyhow::Result<Pass> {
+    let now = now_s();
+    let mut next_retry = None::<u64>;
+    let mut due = Vec::new();
+    {
+        let txn = Transaction::new(ndb)?;
+        for result in ndb.query(&txn, &[webhook_filter(&cfg.providers)], MAX_LOCAL_QUERY)? {
+            let id = *result.note.id();
+            match state.due(&id, now)? {
+                Due::Now => {
+                    if let Ok(rec) = hookstr_core::parse_webhook_note(&result.note) {
+                        due.push((id, rec));
+                    }
+                }
+                Due::Later(at) => next_retry = Some(next_retry.map_or(at, |n| n.min(at))),
+                Due::Never => {}
+            }
+        }
+    }
+    // received_at_ms is hookstrd's receipt clock, finer than created_at.
+    due.sort_by(|(a_id, a), (b_id, b)| (a.received_at_ms, a_id).cmp(&(b.received_at_ms, b_id)));
+
+    for batch in due.chunks(exec.batch_max) {
+        let input: String = batch
+            .iter()
+            .map(|(id, rec)| exec::envelope_line(id, rec))
+            .collect();
+        let ids: Vec<[u8; 32]> = batch.iter().map(|(id, _)| *id).collect();
+        match exec::run_batch(exec, phase, input.as_bytes()).await {
+            Ok(()) => {
+                state.mark_replayed_all(&ids)?;
+                tracing::info!(phase = phase.as_str(), "delivered a batch of {}", ids.len());
+            }
+            Err(err) => {
+                if let Some(at) = state.mark_failed_all(&ids, now_s())? {
+                    next_retry = Some(next_retry.map_or(at, |n| n.min(at)));
+                }
+                tracing::warn!(
+                    phase = phase.as_str(),
+                    "batch of {} failed, retrying in {}s: {err:#}",
+                    ids.len(),
+                    next_retry.unwrap_or(0).saturating_sub(now_s())
+                );
+                return Ok(Pass {
+                    failed: true,
+                    next_retry,
+                });
+            }
+        }
+    }
+    Ok(Pass {
+        failed: false,
+        next_retry,
+    })
 }
 
 /// Handle everything stored locally that is due, oldest first.
@@ -414,7 +626,7 @@ async fn handle_event(
 ) -> anyhow::Result<Outcome> {
     let due_state = match mode {
         Mode::Replay { state, .. } => Some(*state),
-        Mode::Peek { state } => *state,
+        Mode::Peek { state, .. } => *state,
     };
     if let Some(state) = due_state {
         if !state.is_due(id, now_s())? {
@@ -431,7 +643,14 @@ async fn handle_event(
         return Ok(Outcome::NotDue);
     };
     let Mode::Replay { state, http } = mode else {
-        print_delivery(id, cfg.target_for(&rec.path).as_deref(), &rec)?;
+        if let Mode::Peek { json: true, .. } = mode {
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            out.write_all(exec::envelope_line(id, &rec).as_bytes())?;
+            out.flush()?;
+        } else {
+            print_delivery(id, cfg.target_for(&rec.path).as_deref(), &rec)?;
+        }
         return Ok(Outcome::Printed);
     };
     let Some(target) = cfg.target_for(&rec.path) else {

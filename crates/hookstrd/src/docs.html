@@ -349,6 +349,19 @@
     new arrivals and <code>--all</code> includes ones already replayed. A plain peek can't run beside
     a running drain, since redb lets one process hold the replay state; use <code>peek --all</code>
     there.</p>
+  <p><code>peek --json</code> prints one JSON envelope per line instead: <code>id</code>,
+    <code>path</code>, <code>received_at_ms</code>, <code>provider</code>, <code>headers</code>,
+    <code>body</code> and <code>body_encoding</code> (<code>json</code>, <code>utf8</code> or
+    <code>base64</code>). These are the lines <code>drain --exec</code> feeds its command.</p>
+  <p>A consumer can be a script instead of a server. <code>hookstr drain --exec &lt;cmd&gt;</code>, in
+    place of <code>--target</code>, runs <code>&lt;cmd&gt;</code> under <code>sh -c</code> once per
+    batch. The batch arrives on stdin as those envelope lines, oldest first, with
+    <code>HOOKSTR_PHASE=backfill</code> during catch-up and <code>live</code> while following.
+    Exit 0 acks the whole batch. A non-zero exit or a timeout (<code>--exec-timeout</code>, default
+    60s) retries the whole batch after backoff. <code>--batch-max</code> (default 500) caps a batch, and
+    <code>--batch-window</code> (default 2s) gathers live arrivals into one. Give an exec drain its own
+    config with its own <code>redb_path</code> and <code>db_path</code>, since replay state is keyed by
+    event id, not by consumer. The README has the full envelope contract.</p>
   <p>Replay state (attempt counts, backoff) is client-local in redb, keyed by event id. A target that's
     down just means backoff and retry — the events are already durable on the server, so nothing is
     lost. Replay is <strong>at-least-once</strong>: your handler must dedupe on the provider's
@@ -391,17 +404,21 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
     </tr>
     <tr>
       <td><code>drain [providers…]</code></td>
-      <td><code>--once</code>, <code>--target &lt;url&gt;</code>, <code>--config &lt;path&gt;</code></td>
+      <td><code>--once</code>, <code>--target &lt;url&gt;</code>, <code>--exec &lt;cmd&gt;</code>,
+        <code>--batch-max &lt;n&gt;</code>, <code>--batch-window &lt;dur&gt;</code>,
+        <code>--exec-timeout &lt;dur&gt;</code>, <code>--config &lt;path&gt;</code></td>
       <td>Sync, replay the backlog, then follow. <code>--target</code> sets the replay base
-        (deliveries POST to <code>{target}/{path}</code>); <code>--once</code> exits after catch-up;
-        positional providers scope by <code>t</code> tag.</td>
+        (deliveries POST to <code>{target}/{path}</code>); <code>--exec</code> delivers batches of
+        NDJSON envelopes to a command instead, its exit code the ack; <code>--once</code> exits after
+        catch-up; positional providers scope by <code>t</code> tag.</td>
     </tr>
     <tr>
       <td><code>peek [providers…]</code></td>
-      <td><code>--follow</code>, <code>--all</code>, <code>--config &lt;path&gt;</code></td>
+      <td><code>--follow</code>, <code>--all</code>, <code>--json</code>, <code>--config &lt;path&gt;</code></td>
       <td>Sync like <code>drain</code>, but print each undelivered webhook to stdout instead of
         replaying it; never touches replay state. <code>--follow</code> keeps printing new arrivals;
-        <code>--all</code> includes already-replayed ones.</td>
+        <code>--all</code> includes already-replayed ones; <code>--json</code> prints the
+        <code>drain --exec</code> envelope lines.</td>
     </tr>
     <tr>
       <td><code>keygen</code></td>

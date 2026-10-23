@@ -12,12 +12,16 @@ hookstr-core.workspace = true
 nostrdb.workspace = true
 nostrdb_net.workspace = true
 secp256k1.workspace = true
-tokio.workspace = true
+# process + io-util: drain --exec spawns the command and writes its stdin.
+tokio = { workspace = true, features = ["process", "io-util"] }
 futures-util.workspace = true
 reqwest.workspace = true
 redb.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# preserve_order: --exec/peek --json envelopes keep header order and the
+# body's own key order instead of sorting keys.
+serde_json = { workspace = true, features = ["preserve_order"] }
+base64.workspace = true
 toml.workspace = true
 clap.workspace = true
 hex.workspace = true
@@ -35,5 +39,7 @@ hookstrd = { path = "../hookstrd" }
 nostrdb_net.workspace = true
 axum.workspace = true
 tempfile = "3"
+serde_json.workspace = true
+base64.workspace = true
 # The e2e drives the drain binary as a child process.
 tokio = { workspace = true, features = ["process"] }

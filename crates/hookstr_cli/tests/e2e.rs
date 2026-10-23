@@ -485,3 +485,328 @@ async fn peek_prints_without_replaying_and_all_shows_replayed() {
         "--all shows replayed webhooks: {stdout}"
     );
 }
+
+/// A `drain --exec` consumer that records every run as
+/// `attempts/<n>-<phase>.ndjson` (its stdin), then exits 0. Touch `fail-once`
+/// in its dir to make the next run exit 1, or `hang-once` to make it write
+/// its pid to `hung.pid` and sleep past any test timeout.
+struct Recorder {
+    dir: std::path::PathBuf,
+    /// The `--exec` command line.
+    cmd: String,
+}
+
+impl Recorder {
+    fn new(world: &World) -> Recorder {
+        let dir = world.tmp.path().join("recorder");
+        std::fs::create_dir_all(dir.join("attempts")).expect("recorder dir");
+        let script = dir.join("record.sh");
+        std::fs::write(
+            &script,
+            format!(
+                r#"dir='{}'
+n=$(printf %03d "$(ls "$dir/attempts" | wc -l)")
+cat > "$dir/stdin.$$"
+mv "$dir/stdin.$$" "$dir/attempts/$n-$HOOKSTR_PHASE.ndjson"
+if [ -e "$dir/hang-once" ]; then rm "$dir/hang-once"; echo $$ > "$dir/hung.pid"; exec sleep 60; fi
+if [ -e "$dir/fail-once" ]; then rm "$dir/fail-once"; exit 1; fi
+exit 0
+"#,
+                dir.display()
+            ),
+        )
+        .expect("recorder script");
+        let cmd = format!("exec sh '{}'", script.display());
+        Recorder { dir, cmd }
+    }
+
+    fn arm(&self, flag: &str) {
+        std::fs::write(self.dir.join(flag), "").expect("arm recorder");
+    }
+
+    /// Every run so far, in order: (phase, stdin lines parsed as JSON).
+    fn attempts(&self) -> Vec<(String, Vec<serde_json::Value>)> {
+        let mut names: Vec<_> = std::fs::read_dir(self.dir.join("attempts"))
+            .expect("attempts dir")
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| {
+                let phase = name
+                    .trim_end_matches(".ndjson")
+                    .split_once('-')
+                    .unwrap()
+                    .1
+                    .to_owned();
+                let text = std::fs::read_to_string(self.dir.join("attempts").join(&name)).unwrap();
+                let lines = text
+                    .lines()
+                    .map(|line| serde_json::from_str(line).expect("envelope line is JSON"))
+                    .collect();
+                (phase, lines)
+            })
+            .collect()
+    }
+
+    /// Wait until at least `n` runs are recorded and return them all.
+    async fn wait_for(&self, n: usize) -> Vec<(String, Vec<serde_json::Value>)> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let attempts = self.attempts();
+            if attempts.len() >= n {
+                return attempts;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "wanted {n} exec runs, got {}: {attempts:?}",
+                attempts.len()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// The bodies a batch carried, as text, in order.
+fn batch_bodies(lines: &[serde_json::Value]) -> Vec<String> {
+    lines.iter().map(|env| env["body"].to_string()).collect()
+}
+
+impl World {
+    /// Ingest `bodies` as acme/invoice deliveries, a few ms apart so their
+    /// receipt order is unambiguous.
+    async fn ingest_all(&self, bodies: &[&str]) {
+        for (i, body) in bodies.iter().enumerate() {
+            let id = format!("wh_{i}_{body}");
+            assert_eq!(
+                self.ingest("acme/invoice", &[("x-webhook-id", &id)], body.as_bytes())
+                    .await,
+                StatusCode::NO_CONTENT
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Start a following `drain --exec` with extra args.
+    fn spawn_exec_follower(&self, recorder: &Recorder, args: &[&str]) -> tokio::process::Child {
+        self.drain_cmd()
+            .args(["--exec", &recorder.cmd])
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn exec follower")
+    }
+}
+
+#[tokio::test]
+async fn exec_once_delivers_batches_oldest_first_and_acks_on_exit_zero() {
+    let world = World::start().await;
+    let recorder = Recorder::new(&world);
+    world
+        .ingest_all(&[r#"{"n":1}"#, r#"{"n":2}"#, r#"{"n":3}"#])
+        .await;
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        world
+            .drain_cmd()
+            .args(["--once", "--exec", &recorder.cmd, "--batch-max", "2"])
+            .output(),
+    )
+    .await
+    .expect("drain finishes")
+    .expect("drain spawns");
+    assert!(
+        output.status.success(),
+        "drain --exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // --batch-max 2 splits three deliveries 2 + 1, oldest first.
+    let attempts = recorder.attempts();
+    assert_eq!(attempts.len(), 2, "{attempts:?}");
+    assert_eq!(attempts[0].0, "backfill");
+    assert_eq!(attempts[1].0, "backfill");
+    assert_eq!(batch_bodies(&attempts[0].1), [r#"{"n":1}"#, r#"{"n":2}"#]);
+    assert_eq!(batch_bodies(&attempts[1].1), [r#"{"n":3}"#]);
+
+    let env = &attempts[0].1[0];
+    assert_eq!(env["path"], "acme/invoice");
+    assert_eq!(env["provider"], "acme");
+    assert_eq!(env["headers"]["x-webhook-id"], r#"wh_0_{"n":1}"#);
+    assert_eq!(env["body_encoding"], "json");
+    assert_eq!(env["id"].as_str().unwrap().len(), 64, "hex event id");
+    assert!(env["received_at_ms"].as_u64().unwrap() > 1_600_000_000_000);
+
+    // peek --json prints the very same envelope lines exec got on stdin.
+    let mut fed: Vec<String> = attempts
+        .iter()
+        .flat_map(|(_, lines)| lines.iter().map(|env| env.to_string()))
+        .collect();
+    let mut peeked: Vec<String> = world
+        .peek(&["--all", "--json"])
+        .await
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    fed.sort();
+    peeked.sort();
+    assert_eq!(peeked, fed);
+
+    // Exit 0 acked every batch: a second pass runs nothing.
+    let output = world
+        .drain_cmd()
+        .args(["--once", "--exec", &recorder.cmd])
+        .output()
+        .await
+        .expect("drain spawns");
+    assert!(output.status.success());
+    assert_eq!(recorder.attempts().len(), 2, "acked batches must not rerun");
+    assert_eq!(
+        world.peek(&["--json"]).await,
+        "",
+        "nothing left undelivered"
+    );
+}
+
+#[tokio::test]
+async fn exec_nonzero_exit_retries_the_same_batch() {
+    let world = World::start().await;
+    let recorder = Recorder::new(&world);
+    world.ingest_all(&["first", "second"]).await;
+    recorder.arm("fail-once");
+
+    // A 1s backoff base makes the first retry come 2s after the failure.
+    let mut child = world.spawn_exec_follower(&recorder, &["--retry-base-secs", "1"]);
+    let attempts = recorder.wait_for(2).await;
+    child.kill().await.expect("stop follower");
+
+    assert_eq!(attempts[0].1, attempts[1].1, "the retry is the same batch");
+    assert_eq!(batch_bodies(&attempts[1].1), [r#""first""#, r#""second""#]);
+    // The catch-up isn't done until a pass gets through, so the retry is
+    // still backfill.
+    assert_eq!(attempts[1].0, "backfill");
+    assert_eq!(attempts.len(), 2, "acked on the retry: {attempts:?}");
+}
+
+#[tokio::test]
+async fn exec_timeout_kills_the_command_and_retries() {
+    let world = World::start().await;
+    let recorder = Recorder::new(&world);
+    world.ingest_all(&["slow"]).await;
+    recorder.arm("hang-once");
+
+    let mut child = world.spawn_exec_follower(
+        &recorder,
+        &["--exec-timeout", "1s", "--retry-base-secs", "1"],
+    );
+    let attempts = recorder.wait_for(2).await;
+    child.kill().await.expect("stop follower");
+    assert_eq!(attempts[0].1, attempts[1].1, "the retry is the same batch");
+
+    // The hung run was killed at the timeout, not left sleeping.
+    let pid = std::fs::read_to_string(recorder.dir.join("hung.pid")).unwrap();
+    let alive = std::process::Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive, "timed-out command {pid} still running");
+}
+
+#[tokio::test]
+async fn exec_phase_flips_to_live_and_the_window_coalesces() {
+    let world = World::start().await;
+    let recorder = Recorder::new(&world);
+    world.ingest_all(&["backlog"]).await;
+
+    let mut child = world.spawn_exec_follower(&recorder, &["--batch-window", "3s"]);
+    let attempts = recorder.wait_for(1).await;
+    assert_eq!(attempts[0].0, "backfill");
+    assert_eq!(batch_bodies(&attempts[0].1), [r#""backlog""#]);
+
+    // Two arrivals inside one window go out as one live batch.
+    world.ingest_all(&["live-a", "live-b"]).await;
+    let attempts = recorder.wait_for(2).await;
+    child.kill().await.expect("stop follower");
+    assert_eq!(attempts[1].0, "live");
+    assert_eq!(batch_bodies(&attempts[1].1), [r#""live-a""#, r#""live-b""#]);
+}
+
+#[tokio::test]
+async fn peek_json_envelopes_round_trip_every_body_kind() {
+    use base64::Engine;
+    let world = World::start().await;
+    let json_body = b"{\n  \"z\": 1,\n  \"a\": {\"nested\": [1, 2.5, null]}\n}\n";
+    let text_body = b"plain=text&not=json";
+    let blob_body: &[u8] = &[0xff, 0x00, 0xfe, b'\n', 0x42];
+    for (path, body) in [
+        ("acme/json", &json_body[..]),
+        ("acme/text", &text_body[..]),
+        ("acme/blob", blob_body),
+    ] {
+        assert_eq!(
+            world
+                .ingest(path, &[("x-a", "1"), ("x-a", "2")], body)
+                .await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    let stdout = world.peek(&["--all", "--json"]).await;
+    let envs: HashMap<String, serde_json::Value> = stdout
+        .lines()
+        .map(|line| {
+            let env: serde_json::Value = serde_json::from_str(line).expect("one envelope per line");
+            (env["path"].as_str().unwrap().to_owned(), env)
+        })
+        .collect();
+    assert_eq!(envs.len(), 3, "{stdout}");
+
+    let env = &envs["acme/json"];
+    assert_eq!(env["body_encoding"], "json");
+    assert_eq!(
+        env["body"],
+        serde_json::from_slice::<serde_json::Value>(json_body).unwrap()
+    );
+    assert_eq!(env["headers"]["x-a"], "1, 2", "repeated headers joined");
+
+    let env = &envs["acme/text"];
+    assert_eq!(env["body_encoding"], "utf8");
+    assert_eq!(env["body"].as_str().unwrap().as_bytes(), text_body);
+
+    let env = &envs["acme/blob"];
+    assert_eq!(env["body_encoding"], "base64");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(env["body"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decoded, blob_body);
+}
+
+#[tokio::test]
+async fn exec_tuning_flags_need_exec() {
+    let world = World::start().await;
+    let output = world
+        .drain_cmd()
+        .args(["--once", "--target", &world.target_url, "--batch-max", "5"])
+        .output()
+        .await
+        .expect("drain spawns");
+    assert!(
+        !output.status.success(),
+        "a stray --batch-max must not start a URL drain"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("only apply with --exec"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
