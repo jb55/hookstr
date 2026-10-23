@@ -277,6 +277,11 @@ a URL drain would let whichever consumer acks a webhook first mark it
 delivered for the other, and the second drain on one redb file fails to
 start anyway.
 
+For a worked consumer, see
+[`contrib/gitlab-notify`](contrib/gitlab-notify/README.md): desktop
+notifications for GitLab pipelines, reviews, conflicts and comments, with a
+backfill summary and per-MR comment digests.
+
 #### Envelope format
 
 Each line is one compact JSON object followed by `\n`. A line never
