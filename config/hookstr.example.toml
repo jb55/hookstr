@@ -4,13 +4,10 @@
 # Paths are used verbatim (no ~ expansion); relative paths resolve against
 # the cwd you run the drain from.
 #
-# hookstrd's relay has no auth, so it listens on localhost only; reach it over
-# a tunnel, e.g. `ssh -NL 8081:127.0.0.1:8081 hooks.example.com`.
+# hookstrd's relay has no auth, so it listens on localhost (or a private
+# interface) only; reach it over a tunnel or VPN, e.g.
+# `ssh -NL 8081:127.0.0.1:8081 hooks.example.com`.
 relay_url = "ws://127.0.0.1:8081"
-# A copy of hookstrd's nsec file (its nsec_path). Only events signed by that
-# key are synced or replayed, so events anyone else pushes into the relay are
-# ignored.
-server_nsec_path = "/var/lib/hookstr-cli/server.nsec"
 db_path = "/var/lib/hookstr-cli/ndb"
 redb_path = "/var/lib/hookstr-cli/replays.redb"
 

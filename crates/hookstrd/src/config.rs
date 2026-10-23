@@ -79,8 +79,7 @@ impl HookstrdConfig {
         }
     }
 
-    /// The server key. It signs every webhook event; the drain trusts only
-    /// events signed by it (via a copy at its `server_nsec_path`).
+    /// The server key. It signs every webhook event.
     pub fn seckey(&self) -> anyhow::Result<[u8; 32]> {
         let nsec = std::fs::read_to_string(&self.nsec_path)
             .with_context(|| format!("reading nsec from {}", self.nsec_path))?;

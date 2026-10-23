@@ -62,10 +62,9 @@ pub async fn serve(listener: TcpListener, ingest: Ingest) -> std::io::Result<()>
 /// Spawn the nostr relay the drain syncs from, on its own `addr`.
 ///
 /// The relay has no auth and ingests any `EVENT` a client sends, so it must
-/// not be reachable by anyone but the drain: bind it to localhost and reach it
-/// over a tunnel (ssh -L, Tailscale, WireGuard). The drain only acts on events
-/// signed by this server's key, so anything pushed into it is stored but never
-/// replayed. Dropping the handle stops the relay.
+/// not be reachable by anyone but the drain: bind it to localhost or a private
+/// interface and reach it over a tunnel or VPN (ssh -L, Tailscale, WireGuard).
+/// Dropping the handle stops the relay.
 pub fn spawn_relay(ndb: Ndb, addr: SocketAddr) -> std::io::Result<RelayHandle> {
     nostrdb_net::relay::server::spawn(ndb, addr)
 }

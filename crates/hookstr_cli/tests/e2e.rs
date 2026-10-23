@@ -1,7 +1,7 @@
 //! End-to-end: the real hookstrd ingest router + relay run in-process, and the
 //! real `hookstr` binary drains against them — provider POST -> durable 204 ->
 //! negentropy drain -> byte-exact replay to a local target, plus redb dedupe,
-//! realtime follow, and forged events in the open relay never replaying.
+//! realtime follow, and peek.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -17,16 +17,11 @@ use nostrdb::{Config, Ndb};
 use tokio::sync::mpsc;
 
 const SERVER_SECRET: [u8; 32] = [0x42; 32];
-const INTRUDER_SECRET: [u8; 32] = [0x99; 32];
 const TOKEN: &str = "test-ingest-token";
 
 /// One replayed delivery as the target saw it: `{provider}/{type}` route,
 /// headers, and the raw body.
 type Delivery = (String, HashMap<String, String>, Vec<u8>);
-
-fn nsec(secret: &[u8; 32]) -> String {
-    bech32::encode::<bech32::Bech32>(bech32::Hrp::parse_unchecked("nsec"), secret).expect("bech32")
-}
 
 /// The whole deployment, minus the CLI: the real hookstrd ingest server and
 /// relay over one nostrdb, a capture target for replays, and the config file
@@ -35,9 +30,6 @@ struct World {
     tmp: tempfile::TempDir,
     /// hookstrd's ingest HTTP port.
     port: u16,
-    /// hookstrd's nostrdb, for injecting events straight into the relay's
-    /// store the way an outside client's `EVENT` would land.
-    ndb: Ndb,
     /// Keeps the relay up for the test's lifetime.
     _relay: nostrdb_net::relay::server::RelayHandle,
     deliveries: mpsc::UnboundedReceiver<Delivery>,
@@ -81,22 +73,16 @@ impl World {
         let target_port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, target).await.unwrap() });
 
-        // The drain's copy of hookstrd's nsec file.
-        let server_nsec_path = tmp.path().join("server.nsec");
-        std::fs::write(&server_nsec_path, format!("{}\n", nsec(&SERVER_SECRET))).expect("nsec");
-
         let target_url = format!("http://127.0.0.1:{target_port}/hook");
         let cfg_path = tmp.path().join("hookstr.toml");
         std::fs::write(
             &cfg_path,
             format!(
                 r#"relay_url = "{}"
-server_nsec_path = "{}"
 db_path = "{}"
 redb_path = "{}"
 "#,
                 relay.url(),
-                server_nsec_path.display(),
                 tmp.path().join("cli-db").display(),
                 tmp.path().join("replay.redb").display(),
             ),
@@ -106,7 +92,6 @@ redb_path = "{}"
         World {
             tmp,
             port,
-            ndb,
             _relay: relay,
             deliveries,
             cfg_path,
@@ -413,7 +398,7 @@ async fn init_writes_config_once() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let init = |relay: &'static str| {
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_hookstr"));
-        cmd.args(["init", relay, "--server-nsec-path", "/keys/server.nsec"])
+        cmd.args(["init", relay])
             .env("XDG_CONFIG_HOME", tmp.path().join("cfg"))
             .env("XDG_DATA_HOME", tmp.path().join("data"));
         async move { cmd.output().await.expect("init runs") }
@@ -431,68 +416,11 @@ async fn init_writes_config_once() {
         cfg.contains(r#"relay_url = "ws://127.0.0.1:9999""#),
         "{cfg}"
     );
-    assert!(
-        cfg.contains(r#"server_nsec_path = "/keys/server.nsec""#),
-        "{cfg}"
-    );
 
     // A second init must not clobber the config.
     let out = init("ws://127.0.0.1:1111").await;
     assert!(!out.status.success(), "re-init must refuse");
     assert!(std::fs::read_to_string(&cfg_path).unwrap().contains("9999"));
-}
-
-#[tokio::test]
-async fn forged_events_in_the_open_relay_never_replay() {
-    let mut world = World::start().await;
-
-    // The relay has no auth and ingests any EVENT, so an outsider can plant a
-    // well-formed webhook event signed with their own key. Land one straight
-    // in hookstrd's store, exactly where such an EVENT ends up.
-    let forged = hookstr_core::WebhookRecord {
-        provider: "acme".to_owned(),
-        path: "acme/invoice".to_owned(),
-        headers: vec![("x-webhook-id".to_owned(), "wh_forged".to_owned())],
-        body: b"forged".to_vec(),
-        received_at_ms: 1,
-    };
-    let frame = {
-        let note = hookstr_core::sign_webhook_note(&forged, &INTRUDER_SECRET).expect("sign");
-        hookstr_core::event_frame(&note).expect("frame")
-    };
-    world.ndb.process_client_event(&frame).expect("inject");
-
-    assert_eq!(
-        world
-            .ingest("acme/invoice", &[("x-webhook-id", "wh_real")], b"real")
-            .await,
-        StatusCode::NO_CONTENT
-    );
-
-    let output = world.drain_once().await;
-    assert!(
-        output.status.success(),
-        "drain failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let (_, headers, body) = world.next_delivery().await;
-    assert_eq!(body, b"real", "only hookstrd-signed events replay");
-    assert_eq!(
-        headers.get("x-webhook-id").map(String::as_str),
-        Some("wh_real")
-    );
-    // Give a stray forged replay time to show up before calling it absent.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        world.deliveries.try_recv().is_err(),
-        "the forged event must never replay"
-    );
-
-    let stdout = world.peek(&["--all"]).await;
-    assert!(
-        !stdout.contains("wh_forged"),
-        "peek never shows forged events either: {stdout}"
-    );
 }
 
 #[tokio::test]

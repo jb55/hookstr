@@ -4,9 +4,9 @@
 > nostrdb-rs's `sync-progress` branch, whose relay has no auth and accepts
 > EVENTs. hookstrd serves that relay on its own `relay_addr` (localhost by
 > default) and ingest on `ingest_addr`; the combined `listen_addr` mode is
-> gone. The drain reaches the relay through a tunnel and acts only on events
-> signed by hookstrd's own key (a copy at its `server_nsec_path`). The NIP-42
-> sections below are the original design record. See the README for the current setup.
+> gone. The drain reaches the relay through a tunnel or VPN; who can reach its
+> address is the access control. The NIP-42 sections below are the original
+> design record. See the README for the current setup.
 
 ## What this is
 

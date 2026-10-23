@@ -288,9 +288,9 @@
       ingest path.</li>
     <li><b>Store everything</b>No deletion, ever. Negentropy reconciles over the full set, which
       makes sync trivial.</li>
-    <li><b>Pull-only, trusting one key</b>The relay has no auth, so it binds to localhost and the
-      drain reaches it through a tunnel. The drain acts only on events signed by hookstrd's own key,
-      so nothing else pushed into the relay is ever replayed.</li>
+    <li><b>Pull-only, private relay</b>The relay has no auth, so it binds to localhost or a private
+      interface, and the drain reaches it through a tunnel or VPN. Who can reach it is the access
+      control.</li>
   </ul>
 
   <p class="rl instance-only" style="margin-top:32px">

@@ -52,11 +52,10 @@ webhook, eventually, in order, with valid signatures.
 - **Store everything.** No deletion, ever. Negentropy reconciles over the
   full set, which makes sync trivial — and webhook bodies are a few KB,
   so even a million deliveries is single-digit GB.
-- **Pull-only, trusting one key.** The relay has no auth and will store
-  any event a client sends it, so it binds to localhost and the drain
-  reaches it through a tunnel. The drain holds a copy of hookstrd's key
-  (`server_nsec_path`): it syncs and replays only events signed by it, so
-  anything else pushed into the relay is never acted on. On the client,
+- **Pull-only, private relay.** The relay has no auth and will store any
+  event a client sends it, so who can reach its address is the access
+  control: it binds to localhost or a private interface (e.g. WireGuard),
+  and the drain reaches it through a tunnel or the VPN. On the client,
   replay only acts on notes read back out of the local nostrdb after its
   ingester has verified and committed them — never on wire frames.
 
@@ -70,8 +69,7 @@ one `header` tag per preserved header. Schema lives in
 
 ### Server (the always-online box)
 
-Generate a keypair for the server. The drain gets a copy of the same
-nsec file:
+Generate a keypair for the server:
 
 ```
 $ hookstr keygen
@@ -135,12 +133,10 @@ $ ssh -NL 8081:127.0.0.1:8081 hooks.example.com
 
 `hookstr init` writes a starter `~/.config/hookstr/config.toml`, with the
 local mirror db under `~/.local/share/hookstr/`. Give it the relay URL as
-the tunnel exposes it (default `ws://127.0.0.1:8081`) and a copy of
-hookstrd's nsec file:
+the tunnel exposes it (default `ws://127.0.0.1:8081`):
 
 ```
-$ scp hooks.example.com:/var/lib/hookstr/server.nsec ~/.config/hookstr/
-$ hookstr init ws://127.0.0.1:8081 --server-nsec-path ~/.config/hookstr/server.nsec
+$ hookstr init ws://127.0.0.1:8081
 wrote config /home/you/.config/hookstr/config.toml
 then: hookstr drain --target http://localhost:3000/webhooks
 ```
@@ -210,8 +206,7 @@ backoff and retry; the events are already durable.
 | client crashes mid-replay | at-least-once + consumer dedupe → safe |
 | duplicate provider deliveries | distinct events; consumer dedupes on its delivery id |
 | replay target down | redb retry state + backoff; events are already durable |
-| someone reaches the relay | it has no auth: they can read every stored webhook. Keep `relay_addr` on localhost and behind a tunnel |
-| events pushed into the relay | stored, but never synced or replayed: the drain only acts on events signed by the key in `server_nsec_path` |
+| someone reaches the relay | it has no auth: they can read every stored webhook, and push events the drain would replay. Keep `relay_addr` on localhost or a private interface |
 | ingest URL leaks | rotate the path token, re-register with providers |
 
 ## Crates
@@ -229,8 +224,7 @@ backoff and retry; the events are already durable.
 [`crates/hookstr_cli/tests/e2e.rs`](crates/hookstr_cli/tests/e2e.rs)
 spins up the real hookstrd router + relay in-process and drives the real
 drain binary — byte-exact replay (including a binary/base64 body), redb
-dedupe across runs, realtime follow, peek, and forged events never
-replaying.
+dedupe across runs, realtime follow, and peek.
 
 Both crates pin [nostrdb-rs]'s `sync-progress` branch by git rev.
 

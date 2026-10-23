@@ -9,10 +9,8 @@
 //! Trust boundary: the relay connection only feeds nostrdb's ingester, which
 //! verifies before committing. Everything we act on — including the realtime
 //! notifications in follow mode — is read back out of the local nostrdb, so
-//! replay never trusts a wire frame. The relay has no auth and accepts writes,
-//! so every filter is pinned to hookstrd's pubkey (derived from
-//! `server_nsec_path`): only events hookstrd itself signed are ever synced or
-//! acted on.
+//! replay never trusts a wire frame. The relay has no auth; who can reach its
+//! address is the access control.
 //!
 //! `peek` runs the same sync but prints deliveries instead of replaying them,
 //! and never writes replay state.
@@ -39,13 +37,10 @@ const MAX_LOCAL_QUERY: i32 = 1_000_000;
 /// The sync session's subscription id for this drain's webhook set.
 const SUBSCRIPTION_ID: &str = "hookstr";
 
-/// This drain's webhook set: our dedicated kind, signed by hookstrd's key,
-/// narrowed to the configured providers via the indexed `t` tag. Empty
-/// `providers` means every provider.
-fn webhook_filter(server_pubkey: &[u8; 32], providers: &[String]) -> Filter {
-    let mut b = Filter::new()
-        .kinds([hookstr_core::KIND_WEBHOOK as u64])
-        .authors([server_pubkey]);
+/// This drain's webhook set: our dedicated kind, narrowed to the configured
+/// providers via the indexed `t` tag. Empty `providers` means every provider.
+fn webhook_filter(providers: &[String]) -> Filter {
+    let mut b = Filter::new().kinds([hookstr_core::KIND_WEBHOOK as u64]);
     if !providers.is_empty() {
         b = b.tags(providers.iter().map(String::as_str), 't');
     }
@@ -92,10 +87,6 @@ enum Command {
         /// hookstrd's relay endpoint as the drain reaches it, usually through
         /// a tunnel (default: ws://127.0.0.1:8081).
         relay_url: Option<String>,
-        /// Path to a copy of hookstrd's nsec file (placeholder written if
-        /// omitted; the drain refuses to start until it points at one).
-        #[arg(long)]
-        server_nsec_path: Option<String>,
         /// Where to write the TOML config file
         /// (default: $XDG_CONFIG_HOME/hookstr/config.toml).
         #[arg(long)]
@@ -123,8 +114,7 @@ enum Command {
         /// Empty = all.
         providers: Vec<String>,
     },
-    /// Generate a keypair, for hookstrd's nsec_path (and a copy at the
-    /// drain's server_nsec_path).
+    /// Generate a keypair, for hookstrd's nsec_path.
     Keygen,
 }
 
@@ -169,11 +159,7 @@ async fn main() -> anyhow::Result<()> {
             cfg.providers = providers;
             peek(cfg, follow, all).await
         }
-        Command::Init {
-            relay_url,
-            server_nsec_path,
-            config,
-        } => init(relay_url, server_nsec_path, config),
+        Command::Init { relay_url, config } => init(relay_url, config),
         Command::Keygen => keygen(),
     }
 }
@@ -196,11 +182,7 @@ fn keygen() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init(
-    relay_url: Option<String>,
-    server_nsec_path: Option<String>,
-    config: Option<String>,
-) -> anyhow::Result<()> {
+fn init(relay_url: Option<String>, config: Option<String>) -> anyhow::Result<()> {
     let cfg_path = match config {
         Some(path) => std::path::PathBuf::from(path),
         None => config::default_path()?,
@@ -219,19 +201,16 @@ fn init(
     std::fs::create_dir_all(&data_dir)?;
 
     let relay_url = relay_url.unwrap_or_else(|| "ws://127.0.0.1:8081".to_owned());
-    let server_nsec_path = server_nsec_path.unwrap_or_else(|| "CHANGE-ME".to_owned());
     std::fs::write(
         &cfg_path,
         format!(
             r#"# hookstr drain config. See config/hookstr.example.toml in the repo for
 # every option (per-path replay targets, etc).
 #
-# hookstrd's relay has no auth, so it listens on localhost only; reach it
-# over a tunnel, e.g. `ssh -NL 8081:127.0.0.1:8081 hooks.example.com`.
+# hookstrd's relay has no auth, so it listens on localhost (or a private
+# interface) only; reach it over a tunnel or VPN, e.g.
+# `ssh -NL 8081:127.0.0.1:8081 hooks.example.com`.
 relay_url = "{relay_url}"
-# A copy of hookstrd's nsec file (its nsec_path). Only events signed by that
-# key are synced or replayed.
-server_nsec_path = "{server_nsec_path}"
 db_path = "{db}"
 redb_path = "{redb}"
 
@@ -251,9 +230,6 @@ redb_path = "{redb}"
         ),
     )?;
     println!("wrote config {}", cfg_path.display());
-    if server_nsec_path == "CHANGE-ME" {
-        println!("set its server_nsec_path to a copy of hookstrd's nsec file");
-    }
     println!("then: hookstr drain --target http://localhost:3000/webhooks");
     Ok(())
 }
@@ -316,7 +292,6 @@ async fn peek(cfg: DrainConfig, follow: bool, all: bool) -> anyhow::Result<()> {
 /// disconnected are filled) plus, when following, a live REQ. It ingests into
 /// `ndb`; we only ever read back out of it.
 async fn run(cfg: &DrainConfig, mode: &Mode<'_>, follow: bool) -> anyhow::Result<()> {
-    let server_pubkey = cfg.server_pubkey()?;
     std::fs::create_dir_all(&cfg.db_path)?;
     let ndb = Ndb::new(&cfg.db_path, &Config::new())?;
 
@@ -324,7 +299,7 @@ async fn run(cfg: &DrainConfig, mode: &Mode<'_>, follow: bool) -> anyhow::Result
     // no arrival can fall between the backlog pass and the follow loop. It
     // fires only for verified, committed notes.
     let mut incoming = if follow {
-        let sub = ndb.subscribe(&[webhook_filter(&server_pubkey, &cfg.providers)])?;
+        let sub = ndb.subscribe(&[webhook_filter(&cfg.providers)])?;
         Some(SubscriptionStream::new(ndb.clone(), sub).notes_per_await(1))
     } else {
         None
@@ -332,7 +307,7 @@ async fn run(cfg: &DrainConfig, mode: &Mode<'_>, follow: bool) -> anyhow::Result
 
     let session = Session::new(ndb.clone());
     let live = if follow {
-        vec![webhook_filter(&server_pubkey, &cfg.providers)]
+        vec![webhook_filter(&cfg.providers)]
     } else {
         Vec::new()
     };
@@ -340,7 +315,7 @@ async fn run(cfg: &DrainConfig, mode: &Mode<'_>, follow: bool) -> anyhow::Result
         SUBSCRIPTION_ID,
         cfg.relay_url.clone(),
         live,
-        vec![webhook_filter(&server_pubkey, &cfg.providers)],
+        vec![webhook_filter(&cfg.providers)],
     );
     session.wait_for_sync().await;
     let status = session.backfill_status().borrow().clone();
@@ -360,7 +335,7 @@ async fn run(cfg: &DrainConfig, mode: &Mode<'_>, follow: bool) -> anyhow::Result
         tracing::info!("synced {} missing webhook event(s)", status.fetched);
     }
 
-    handle_backlog(cfg, &ndb, &server_pubkey, mode).await?;
+    handle_backlog(cfg, &ndb, mode).await?;
 
     let Some(incoming) = incoming.as_mut() else {
         return Ok(());
@@ -382,16 +357,11 @@ async fn run(cfg: &DrainConfig, mode: &Mode<'_>, follow: bool) -> anyhow::Result
 }
 
 /// Handle everything stored locally that is due, oldest first.
-async fn handle_backlog(
-    cfg: &DrainConfig,
-    ndb: &Ndb,
-    server_pubkey: &[u8; 32],
-    mode: &Mode<'_>,
-) -> anyhow::Result<()> {
+async fn handle_backlog(cfg: &DrainConfig, ndb: &Ndb, mode: &Mode<'_>) -> anyhow::Result<()> {
     // Collected owned so the non-Send Transaction is gone before the awaits.
     let mut backlog = {
         let txn = Transaction::new(ndb)?;
-        let filter = webhook_filter(server_pubkey, &cfg.providers);
+        let filter = webhook_filter(&cfg.providers);
         ndb.query(&txn, &[filter], MAX_LOCAL_QUERY)?
             .into_iter()
             .map(|result| (*result.note.id(), result.note.created_at()))
