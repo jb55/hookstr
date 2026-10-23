@@ -35,10 +35,20 @@ impl ReplayState {
         Self::open_with_backoff(path, BACKOFF_BASE_SECS)
     }
 
+    /// A replay state that lives in memory and is gone when dropped, for
+    /// `peek --exec`'s throwaway acks.
+    pub fn in_memory(backoff_base_secs: u64) -> anyhow::Result<Self> {
+        let db = redb::Builder::new().create_with_backend(redb::backends::InMemoryBackend::new())?;
+        Self::init(db, backoff_base_secs)
+    }
+
     /// Like [`open`](Self::open), with failures backing off from
     /// `backoff_base_secs` instead of the default 30s.
     pub fn open_with_backoff(path: &str, backoff_base_secs: u64) -> anyhow::Result<Self> {
-        let db = redb::Database::create(path)?;
+        Self::init(redb::Database::create(path)?, backoff_base_secs)
+    }
+
+    fn init(db: redb::Database, backoff_base_secs: u64) -> anyhow::Result<Self> {
         // Materialize the table so reads before the first write don't hit
         // TableDoesNotExist.
         let write = db.begin_write()?;

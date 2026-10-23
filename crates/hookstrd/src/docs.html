@@ -354,7 +354,9 @@
   <p><code>peek --json</code> prints one JSON envelope per line instead: <code>id</code>,
     <code>path</code>, <code>received_at_ms</code>, <code>provider</code>, <code>headers</code>,
     <code>body</code> and <code>body_encoding</code> (<code>json</code>, <code>utf8</code> or
-    <code>base64</code>). These are the lines <code>drain --exec</code> feeds its command.</p>
+    <code>base64</code>). These are the lines <code>drain --exec</code> feeds its command. To develop such a
+    consumer, run it under <code>peek --exec &lt;cmd&gt;</code>: the same batches, phases and retries
+    as <code>drain --exec</code>, with acks kept in memory and never written.</p>
   <p>A consumer can be a script instead of a server. <code>hookstr drain --exec &lt;cmd&gt;</code>, in
     place of <code>--target</code>, runs <code>&lt;cmd&gt;</code> under <code>sh -c</code> once per
     batch. The batch arrives on stdin as those envelope lines, oldest first, with
@@ -416,7 +418,7 @@ http://localhost:3000/webhooks/<span class="s">acme/events</span></code></pre>
     </tr>
     <tr>
       <td><code>peek [providers…]</code></td>
-      <td><code>--follow</code>, <code>--all</code>, <code>--json</code>, <code>--config &lt;path&gt;</code></td>
+      <td><code>--follow</code>, <code>--all</code>, <code>--json</code>, <code>--exec &lt;cmd&gt;</code> (+ the batch flags), <code>--config &lt;path&gt;</code></td>
       <td>Sync like <code>drain</code>, but print each undelivered webhook to stdout instead of
         replaying it; never touches replay state. <code>--follow</code> keeps printing new arrivals;
         <code>--all</code> includes already-replayed ones; <code>--json</code> prints the

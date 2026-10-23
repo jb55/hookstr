@@ -837,3 +837,78 @@ async fn drain_without_providers_is_refused() {
     let mut world = world;
     assert!(world.deliveries.try_recv().is_err(), "nothing delivered");
 }
+
+#[tokio::test]
+async fn peek_exec_runs_a_consumer_without_acking() {
+    let world = World::start().await;
+    let recorder = Recorder::new(&world);
+    world.ingest_all(&["one", "two"]).await;
+
+    // peek --exec feeds the consumer a backfill batch...
+    world.peek(&["--exec", &recorder.cmd, "acme"]).await;
+    let attempts = recorder.attempts();
+    assert_eq!(attempts.len(), 1, "{attempts:?}");
+    assert_eq!(attempts[0].0, "backfill");
+    assert_eq!(batch_bodies(&attempts[0].1), [r#""one""#, r#""two""#]);
+
+    // ...but its exit 0 acked nothing: a real drain still delivers both.
+    let output = world
+        .drain_cmd()
+        .args(["--once", "--exec", &recorder.cmd])
+        .output()
+        .await
+        .expect("drain spawns");
+    assert!(output.status.success());
+    let attempts = recorder.attempts();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[1].1, attempts[0].1, "the drain got the same batch");
+
+    // Now the drain has acked them: plain peek --exec skips them, as plain
+    // peek does, and --all feeds them again.
+    world.peek(&["--exec", &recorder.cmd, "acme"]).await;
+    assert_eq!(recorder.attempts().len(), 2, "already delivered");
+    world
+        .peek(&["--all", "--exec", &recorder.cmd, "acme"])
+        .await;
+    assert_eq!(recorder.attempts().len(), 3, "--all feeds everything");
+}
+
+#[tokio::test]
+async fn peek_exec_follow_retries_in_memory_and_goes_live() {
+    let world = World::start().await;
+    let recorder = Recorder::new(&world);
+    world.ingest_all(&["backlog"]).await;
+    recorder.arm("fail-once");
+
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_hookstr"))
+        .args(["peek", "--config", world.cfg_path.to_str().unwrap()])
+        .args([
+            "--follow",
+            "--exec",
+            &recorder.cmd,
+            "--retry-base-secs",
+            "1",
+        ])
+        .args(["--batch-window", "1s", "acme"])
+        .current_dir(world.tmp.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn peek --exec --follow");
+
+    // The failed backfill batch retries from the in-memory backoff.
+    let attempts = recorder.wait_for(2).await;
+    assert_eq!(attempts[0].1, attempts[1].1);
+    assert_eq!(attempts[1].0, "backfill");
+
+    world.ingest_all(&["arrival"]).await;
+    let attempts = recorder.wait_for(3).await;
+    child.kill().await.expect("stop peek");
+    assert_eq!(attempts[2].0, "live");
+    assert_eq!(batch_bodies(&attempts[2].1), [r#""arrival""#]);
+
+    // None of it was written down: a drain still owes both webhooks.
+    let stdout = world.peek(&["--json", "acme"]).await;
+    assert_eq!(stdout.lines().count(), 2, "{stdout}");
+}

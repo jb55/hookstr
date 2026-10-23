@@ -78,37 +78,10 @@ enum Command {
         /// feeds, so it lives here rather than in the config. Explicit
         /// [targets] path overrides in the config still win; leave unset to
         /// route purely via those.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "exec")]
         target: Option<String>,
-        /// Deliver to this command instead of POSTing to a target. It runs
-        /// under `sh -c` once per batch, with the batch on stdin as NDJSON
-        /// envelopes (one per line, oldest first; the same lines `peek
-        /// --json` prints) and HOOKSTR_PHASE=backfill|live in its
-        /// environment. Exit 0 acks the whole batch; a non-zero exit or a
-        /// timeout retries the whole batch after the replay backoff. Batches
-        /// run one at a time, in order. The config's [targets] aren't used.
-        #[arg(long, conflicts_with = "target")]
-        exec: Option<String>,
-        // The --exec tuning flags are Options, checked and defaulted below
-        // rather than with clap's `requires` (which a default value or the
-        // --target conflict can skip): a stray --batch-max must not quietly
-        // start a URL drain.
-        /// Most envelopes in one --exec batch [default: 500].
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
-        batch_max: Option<u32>,
-        /// While following, gather webhooks for this long after one arrives
-        /// and deliver them as one --exec batch (one provider action often
-        /// fires several hooks at once). E.g. 500ms, 2s, 1m [default: 2s].
-        #[arg(long, value_parser = exec::parse_duration)]
-        batch_window: Option<Duration>,
-        /// Kill an --exec run that takes longer than this and retry its
-        /// batch. E.g. 30s, 5m [default: 60s].
-        #[arg(long, value_parser = exec::parse_duration)]
-        exec_timeout: Option<Duration>,
-        /// Base of the retry backoff after a failed delivery, in seconds; it
-        /// doubles per failed attempt up to 2^7 times. For tests.
-        #[arg(long, default_value_t = replay_state::BACKOFF_BASE_SECS, hide = true)]
-        retry_base_secs: u64,
+        #[command(flatten)]
+        exec: ExecArgs,
         /// Providers to drain, matched on each event's indexed `t` tag (the
         /// provider names from hookstrd's [ingest_tokens]). At least one is
         /// required: an empty list would match every provider, so a bare
@@ -131,9 +104,11 @@ enum Command {
     },
     /// Sync webhooks down from the relay like `drain`, but print them to
     /// stdout instead of replaying them: path, event id, headers and body.
-    /// Never POSTs and never touches replay state, so a later drain still
+    /// Never POSTs and never writes replay state, so a later drain still
     /// delivers everything shown. Prints the undelivered backlog and exits;
-    /// pass --follow to keep printing new webhooks as they arrive.
+    /// pass --follow to keep printing new webhooks as they arrive. With
+    /// --exec, runs a `drain --exec` consumer instead of printing, acks kept
+    /// in memory for this run only.
     Peek {
         /// Path to the TOML config file
         /// (default: $XDG_CONFIG_HOME/hookstr/config.toml).
@@ -150,14 +125,74 @@ enum Command {
         /// Print one JSON envelope per line instead of the readable form:
         /// exactly what `drain --exec` feeds its command, so `peek --all
         /// --json | ./consumer` tries a consumer out.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "exec")]
         json: bool,
+        #[command(flatten)]
+        exec: ExecArgs,
         /// Providers to show, matched on each event's indexed `t` tag.
         /// Empty = all.
         providers: Vec<String>,
     },
     /// Generate a keypair, for hookstrd's nsec_path.
     Keygen,
+}
+
+/// `--exec` and its tuning flags, shared by `drain` and `peek`.
+#[derive(clap::Args)]
+struct ExecArgs {
+    /// Deliver to this command instead of POSTing (drain) or printing
+    /// (peek). It runs under `sh -c` once per batch, with the batch on stdin
+    /// as NDJSON envelopes (one per line, oldest first; the same lines `peek
+    /// --json` prints) and HOOKSTR_PHASE=backfill|live in its environment.
+    /// Exit 0 acks the whole batch; a non-zero exit or a timeout retries the
+    /// whole batch after the replay backoff. Batches run one at a time, in
+    /// order. The config's [targets] aren't used. Under peek, acks are kept
+    /// in memory and forgotten on exit, so a later drain still delivers
+    /// everything.
+    #[arg(long)]
+    exec: Option<String>,
+    // The tuning flags are Options, checked and defaulted in `into_exec`
+    // rather than with clap's `requires` (which a default value or the
+    // --target conflict can skip): a stray --batch-max must not quietly
+    // start a URL drain.
+    /// Most envelopes in one --exec batch [default: 500].
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    batch_max: Option<u32>,
+    /// While following, gather webhooks for this long after one arrives
+    /// and deliver them as one --exec batch (one provider action often
+    /// fires several hooks at once). E.g. 500ms, 2s, 1m [default: 2s].
+    #[arg(long, value_parser = exec::parse_duration)]
+    batch_window: Option<Duration>,
+    /// Kill an --exec run that takes longer than this and retry its
+    /// batch. E.g. 30s, 5m [default: 60s].
+    #[arg(long, value_parser = exec::parse_duration)]
+    exec_timeout: Option<Duration>,
+    /// Base of the retry backoff after a failed delivery, in seconds; it
+    /// doubles per failed attempt up to 2^7 times. For tests.
+    #[arg(long, default_value_t = replay_state::BACKOFF_BASE_SECS, hide = true)]
+    retry_base_secs: u64,
+}
+
+impl ExecArgs {
+    /// The [`Exec`] to run, or None without --exec. The tuning flags without
+    /// --exec are an error.
+    fn into_exec(self) -> anyhow::Result<Option<Exec>> {
+        let Some(cmd) = self.exec else {
+            anyhow::ensure!(
+                self.batch_max.is_none()
+                    && self.batch_window.is_none()
+                    && self.exec_timeout.is_none(),
+                "--batch-max, --batch-window and --exec-timeout only apply with --exec"
+            );
+            return Ok(None);
+        };
+        Ok(Some(Exec {
+            cmd,
+            batch_max: self.batch_max.unwrap_or(500) as usize,
+            batch_window: self.batch_window.unwrap_or(Duration::from_secs(2)),
+            timeout: self.exec_timeout.unwrap_or(Duration::from_secs(60)),
+        }))
+    }
 }
 
 #[tokio::main]
@@ -179,26 +214,17 @@ async fn main() -> anyhow::Result<()> {
             once,
             target,
             exec,
-            batch_max,
-            batch_window,
-            exec_timeout,
-            retry_base_secs,
             providers,
         } => {
-            anyhow::ensure!(
-                exec.is_some()
-                    || (batch_max.is_none() && batch_window.is_none() && exec_timeout.is_none()),
-                "--batch-max, --batch-window and --exec-timeout only apply with --exec"
-            );
+            let retry_base_secs = exec.retry_base_secs;
+            let exec = exec.into_exec()?;
             let mut cfg = DrainConfig::load(config.as_deref())?;
             cfg.providers = providers;
             let state = ReplayState::open_with_backoff(&cfg.redb_path, retry_base_secs)?;
-            if let Some(cmd) = exec {
-                let exec = Exec {
-                    cmd,
-                    batch_max: batch_max.unwrap_or(500) as usize,
-                    batch_window: batch_window.unwrap_or(Duration::from_secs(2)),
-                    timeout: exec_timeout.unwrap_or(Duration::from_secs(60)),
+            if let Some(exec) = exec {
+                let state = ExecState {
+                    acks: &state,
+                    delivered: None,
                 };
                 return drain_exec(&cfg, &state, &exec, !once).await;
             }
@@ -216,10 +242,16 @@ async fn main() -> anyhow::Result<()> {
             follow,
             all,
             json,
+            exec,
             providers,
         } => {
+            let retry_base_secs = exec.retry_base_secs;
+            let exec = exec.into_exec()?;
             let mut cfg = DrainConfig::load(config.as_deref())?;
             cfg.providers = providers;
+            if let Some(exec) = exec {
+                return peek_exec(&cfg, &exec, follow, all, retry_base_secs).await;
+            }
             peek(cfg, follow, all, json).await
         }
         Command::Init { relay_url, config } => init(relay_url, config),
@@ -351,6 +383,58 @@ async fn peek(cfg: DrainConfig, follow: bool, all: bool, json: bool) -> anyhow::
     .await
 }
 
+/// `peek --exec`: run an exec consumer exactly as `drain --exec` would, but
+/// with its acks and failures in an in-memory replay state that dies with
+/// the process. Without --all, the real replay state is read (never written)
+/// so webhooks a drain already delivered are skipped, as plain peek skips
+/// them.
+async fn peek_exec(
+    cfg: &DrainConfig,
+    exec: &Exec,
+    follow: bool,
+    all: bool,
+    retry_base_secs: u64,
+) -> anyhow::Result<()> {
+    let delivered = if all {
+        None
+    } else {
+        Some(ReplayState::open(&cfg.redb_path).map_err(|err| {
+            anyhow::anyhow!(
+                "opening replay state {}: {err:#} (if a drain is running, `peek --all --exec` works without it)",
+                cfg.redb_path
+            )
+        })?)
+    };
+    let acks = ReplayState::in_memory(retry_base_secs)?;
+    let state = ExecState {
+        acks: &acks,
+        delivered: delivered.as_ref(),
+    };
+    drain_exec(cfg, &state, exec, follow).await
+}
+
+/// Where an exec run reads what's due and records its acks.
+struct ExecState<'a> {
+    /// Takes every ack and failure: the real replay state for a drain, an
+    /// in-memory one for peek.
+    acks: &'a ReplayState,
+    /// Peek only: the real replay state, read and never written. A webhook
+    /// it doesn't call due now (replayed, or backing off) isn't delivered.
+    delivered: Option<&'a ReplayState>,
+}
+
+impl ExecState<'_> {
+    fn due(&self, id: &[u8; 32], now: u64) -> anyhow::Result<Due> {
+        if let Some(delivered) = self.delivered {
+            match delivered.due(id, now)? {
+                Due::Now => {}
+                not_now => return Ok(not_now),
+            }
+        }
+        self.acks.due(id, now)
+    }
+}
+
 /// The local mirror after the initial sync, plus, when following, the
 /// stream of new arrivals. Holds the sync session, which keeps syncing for
 /// as long as this lives.
@@ -453,11 +537,10 @@ async fn sync(cfg: &DrainConfig, follow: bool) -> anyhow::Result<Synced> {
 /// Every pass re-reads what's due from the local mirror and replay state,
 /// so arrivals, retries and the backlog all go through the one path, oldest
 /// first. A failed batch ends its pass: later batches wait for the next one,
-/// which keeps them behind it. The phase is `backfill` until a pass
-/// delivers everything due without a failure, and `live` from then on.
+/// which keeps them behind it.
 async fn drain_exec(
     cfg: &DrainConfig,
-    state: &ReplayState,
+    state: &ExecState<'_>,
     exec: &Exec,
     follow: bool,
 ) -> anyhow::Result<()> {
@@ -466,20 +549,17 @@ async fn drain_exec(
         mut incoming,
         _session,
     } = sync(cfg, follow).await?;
-    let mut phase = Phase::Backfill;
+    // Every webhook already stored and not yet delivered when the run
+    // starts: a batch holding any of them is a backfill batch. Filled by the
+    // first pass, drained as they're acked.
+    let mut backlog = None;
     loop {
-        let pass = exec_pass(cfg, &ndb, state, exec, phase).await?;
-        if phase == Phase::Backfill && !pass.failed {
-            phase = Phase::Live;
-            if follow {
-                tracing::info!("caught up; following: new webhooks go out as live batches");
-            }
-        }
+        let next_retry = exec_pass(cfg, &ndb, state, exec, &mut backlog).await?;
         let Some(incoming) = incoming.as_mut() else {
             return Ok(());
         };
         let retry = async {
-            match pass.next_retry {
+            match next_retry {
                 Some(at) => {
                     tokio::time::sleep(Duration::from_secs(at.saturating_sub(now_s()))).await
                 }
@@ -500,25 +580,26 @@ async fn drain_exec(
     }
 }
 
-struct Pass {
-    /// A batch failed, ending the pass early.
-    failed: bool,
-    /// The earliest backoff deadline among failed deliveries, if any.
-    next_retry: Option<u64>,
-}
-
 /// Deliver everything due, oldest first, in batches of at most
-/// `exec.batch_max`, stopping at the first batch that fails.
+/// `exec.batch_max`, stopping at the first batch that fails. Returns the
+/// earliest backoff deadline among failed deliveries, if any.
+///
+/// `backlog` is None before the first pass, which fills it with every
+/// undelivered webhook it finds, due now or backing off. A batch is
+/// [`Phase::Backfill`] while it holds any of them and [`Phase::Live`]
+/// otherwise, so a retried backlog batch stays backfill and an arrival
+/// delivered while it backs off goes out live.
 async fn exec_pass(
     cfg: &DrainConfig,
     ndb: &Ndb,
-    state: &ReplayState,
+    state: &ExecState<'_>,
     exec: &Exec,
-    phase: Phase,
-) -> anyhow::Result<Pass> {
+    backlog: &mut Option<std::collections::HashSet<[u8; 32]>>,
+) -> anyhow::Result<Option<u64>> {
     let now = now_s();
     let mut next_retry = None::<u64>;
     let mut due = Vec::new();
+    let mut pending = std::collections::HashSet::new();
     {
         let txn = Transaction::new(ndb)?;
         for result in ndb.query(&txn, &[webhook_filter(&cfg.providers)], MAX_LOCAL_QUERY)? {
@@ -526,14 +607,19 @@ async fn exec_pass(
             match state.due(&id, now)? {
                 Due::Now => {
                     if let Ok(rec) = hookstr_core::parse_webhook_note(&result.note) {
+                        pending.insert(id);
                         due.push((id, rec));
                     }
                 }
-                Due::Later(at) => next_retry = Some(next_retry.map_or(at, |n| n.min(at))),
+                Due::Later(at) => {
+                    pending.insert(id);
+                    next_retry = Some(next_retry.map_or(at, |n| n.min(at)));
+                }
                 Due::Never => {}
             }
         }
     }
+    let backlog = backlog.get_or_insert(pending);
     // received_at_ms is hookstrd's receipt clock, finer than created_at.
     due.sort_by(|(a_id, a), (b_id, b)| (a.received_at_ms, a_id).cmp(&(b.received_at_ms, b_id)));
 
@@ -543,13 +629,26 @@ async fn exec_pass(
             .map(|(id, rec)| exec::envelope_line(id, rec))
             .collect();
         let ids: Vec<[u8; 32]> = batch.iter().map(|(id, _)| *id).collect();
+        let phase = if ids.iter().any(|id| backlog.contains(id)) {
+            Phase::Backfill
+        } else {
+            Phase::Live
+        };
         match exec::run_batch(exec, phase, input.as_bytes()).await {
             Ok(()) => {
-                state.mark_replayed_all(&ids)?;
+                state.acks.mark_replayed_all(&ids)?;
                 tracing::info!(phase = phase.as_str(), "delivered a batch of {}", ids.len());
+                if phase == Phase::Backfill {
+                    for id in &ids {
+                        backlog.remove(id);
+                    }
+                    if backlog.is_empty() {
+                        tracing::info!("caught up: every batch from here on is live");
+                    }
+                }
             }
             Err(err) => {
-                if let Some(at) = state.mark_failed_all(&ids, now_s())? {
+                if let Some(at) = state.acks.mark_failed_all(&ids, now_s())? {
                     next_retry = Some(next_retry.map_or(at, |n| n.min(at)));
                 }
                 tracing::warn!(
@@ -558,17 +657,11 @@ async fn exec_pass(
                     ids.len(),
                     next_retry.unwrap_or(0).saturating_sub(now_s())
                 );
-                return Ok(Pass {
-                    failed: true,
-                    next_retry,
-                });
+                return Ok(next_retry);
             }
         }
     }
-    Ok(Pass {
-        failed: false,
-        next_retry,
-    })
+    Ok(next_retry)
 }
 
 /// Handle everything stored locally that is due, oldest first.

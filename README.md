@@ -197,8 +197,22 @@ beside a running `drain` use `peek --all`.
 
 `peek --json` prints one JSON envelope per line instead (the format is
 under [Envelope format](#envelope-format)), the same lines `drain --exec`
-feeds its command, so `hookstr peek --all --json | ./consumer` tries a
-consumer out on everything stored without acking anything.
+feeds its command.
+
+To develop a `drain --exec` consumer, run it under `peek --exec` (below).
+It is the same delivery loop, with the same batches, `HOOKSTR_PHASE`,
+`--batch-window`, timeouts and retries, but the acks live in memory and
+are forgotten when peek exits. Nothing is written, so you can rerun it as
+often as you like, and a real drain later still delivers everything:
+
+```
+$ hookstr peek --all --exec ./notify.py gitlab            # replay the whole store as backfill
+$ hookstr peek --follow --exec ./notify.py gitlab         # then live batches as webhooks arrive
+```
+
+Without `--all`, `peek --exec` reads the drain's replay state (read-only)
+and skips what a drain already delivered, as plain `peek` does. With
+`--all` it feeds everything stored and can run beside a drain.
 
 ### Delivering to a command: `drain --exec`
 
@@ -220,9 +234,12 @@ $ hookstr drain --config ~/.config/hookstr/notify.toml --exec ./notify.py gitlab
   was stored before it started, and `live` from then on, for webhooks
   arriving while it follows. A backfill batch can hold hundreds of old
   webhooks, so it's the place to summarize instead of alerting per event.
-  It switches to `live` once one pass has delivered everything due with
-  no failure; a backfill batch that fails retries as `backfill`. It is
-  the only variable hookstr sets. Headers stay in the envelope and never
+  A batch is `backfill` when it holds any webhook that was already
+  stored and undelivered when the drain started (due then or backing
+  off), and `live` otherwise. So a backfill batch that fails retries as
+  `backfill`, and a webhook that arrives while it backs off goes out as
+  `live`. Once every backlog webhook is acked, every batch is `live`. It
+  is the only variable hookstr sets. Headers stay in the envelope and never
   go in the environment, since stored headers can hold secrets (e.g.
   `x-gitlab-token`) and the environment leaks into child processes and
   `ps`.
