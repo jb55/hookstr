@@ -125,7 +125,9 @@ The script runs the bundle's executable once per notification:
 
 ```
 GitLabNotify.app/Contents/MacOS/GitLabNotify --title T --message M \
-    [--subtitle S] [--url U] [--image PNG] [--group G] [--thread T]
+    [--subtitle S] [--url U] [--image PNG] [--group G] [--thread T] \
+    [--action ID=LABEL]... [--kind K] [--project P] [--iid N] \
+    [--source-branch B] [--mr-url U] [--note-url U]
 ```
 
 It posts through `UNUserNotificationCenter` with the group as the request
@@ -139,9 +141,75 @@ macOS relaunches the app with no arguments, and it opens the url and exits.
 Exit status: 0 posted, 2 notifications not allowed, 3 failed, 64 usage;
 the script logs a non-zero exit and carries on.
 
+The `--action` and context flags are for action buttons (below). The
+script passes them only when a notification has buttons, so a helper built
+before them still posts everything else; when it rejects them (exit 64) the
+script logs "rebuild it" and posts again without buttons.
+
 The first post asks for permission (`GitLabNotify --authorize` asks without
 posting); allow it. A Focus mode holds the banners back but still
 updates Notification Center.
+
+### Action buttons
+
+GitLabNotify.app notifications can carry buttons that run a command of
+yours with the MR's context, e.g. a "Handle Review" button on comment and
+change-request notifications. Configure them in
+`$XDG_CONFIG_HOME/gitlab-notify/actions.json` (default
+`~/.config/gitlab-notify/actions.json`):
+
+```json
+{
+  "handle-review": {
+    "label": "Handle Review",
+    "kinds": ["comments", "changes_requested"],
+    "command": ["/Users/alice/bin/handle-review", "--verbose"]
+  }
+}
+```
+
+- The key is the action's id (letters, digits, `.`, `_`, `-`); `label`
+  is the button text; `kinds` picks the notifications that get the button,
+  from the signal kinds in the table above (`comments`, `changes_requested`,
+  `pipeline_failed`, …).
+- `command` is an argv list, not a shell string, and its first element
+  must be an absolute path. The command runs from your home directory with
+  the environment LaunchServices gives apps, which is minimal: no shell
+  profile and a bare `PATH`. Use absolute paths throughout, or wrap it:
+  `["/bin/bash", "-lc", "handle-review"]` (the string is yours and fixed;
+  the MR data only arrives as env vars).
+- It gets these environment variables, each only when known:
+
+  | variable | value |
+  |---|---|
+  | `GITLAB_NOTIFY_ACTION` | the action id |
+  | `GITLAB_NOTIFY_KIND` | the notification's kind |
+  | `GITLAB_PROJECT` | project path, e.g. `acme/widgets` |
+  | `GITLAB_MR_IID` | the MR's iid |
+  | `GITLAB_SOURCE_BRANCH` | the MR's source branch (for pushes and default-branch pipelines, the branch) |
+  | `GITLAB_MR_URL` | the MR's web URL |
+  | `GITLAB_NOTE_URL` | the comment's URL (comment notifications; in a digest, the latest comment) |
+
+On a click, macOS relaunches the helper, which reads `actions.json` again,
+looks the id up, starts the command detached and exits; the command's
+output is appended to `~/Library/Logs/gitlab-notify-actions.log`, and the
+helper's own complaints (unknown id, bad command) go to the unified log:
+`log show --last 10m --predicate 'process == "GitLabNotify"'`. The command
+only ever comes from this file at click time, never from a webhook or the
+notification, and webhook data only ever reaches it as env vars. Since the
+helper resolves the path from its own environment, which doesn't carry a
+shell's `XDG_CONFIG_HOME`, keep the file at the default path unless you set
+that variable for GUI apps too.
+
+A missing file means no buttons. A malformed file or entry is logged by the
+script and skipped; the notification still goes out, with whatever buttons
+remain valid. Edits take effect on the next notification, and a click
+always runs what the file says now.
+
+With the default Banners style, buttons show on hover (several fold into
+an "Options" menu); set GitLabNotify to Alerts in System Settings >
+Notifications to keep them visible. Backfill summaries, terminal-notifier,
+osascript and notify-send get no buttons.
 
 ## Icons and avatars
 

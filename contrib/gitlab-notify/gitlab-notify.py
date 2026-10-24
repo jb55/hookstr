@@ -22,6 +22,7 @@ Stdlib only. See README.md next to this file.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -87,7 +88,7 @@ def actor_name(user):
 class Signal:
     """One thing worth telling the user about, before delivery decides how."""
 
-    def __init__(self, kind, key, ts, title, subtitle, message, url=None, actor=None):
+    def __init__(self, kind, key, ts, title, subtitle, message, url=None, actor=None, ctx=None):
         self.kind = kind
         self.key = key          # "<project path>!<iid>" or "<project path>@<ref>"
         self.ts = ts            # received_at_ms of the envelope
@@ -96,6 +97,9 @@ class Signal:
         self.message = message
         self.url = url
         self.actor = actor or {}
+        # What an action button's command gets as GITLAB_* env vars: project,
+        # iid, source_branch, mr_url, note_url (only what's known).
+        self.ctx = ctx
 
     def __repr__(self):
         return "Signal(%s %s %r)" % (self.kind, self.key, self.message)
@@ -238,7 +242,7 @@ class Processor:
                     out.append(Signal("review", key, ts, title, sub,
                                       "Review requested: %s" % names, url, user))
         out.extend(self.track_status(key, ts, oa, project, url))
-        return out
+        return with_ctx(out, mr_ctx(project, oa))
 
     def pipeline(self, body, ts):
         oa = body.get("object_attributes") or {}
@@ -251,6 +255,7 @@ class Processor:
             key = mr_key(project, mr)
             if key is not None:
                 out.extend(self.track_status(key, ts, mr, project, mr.get("url")))
+            with_ctx(out, mr_ctx(project, mr))
         # Child pipelines report into their parent, which is what we notify on.
         if source == "parent_pipeline" or status not in ("success", "failed", "canceled"):
             return out
@@ -259,10 +264,12 @@ class Processor:
             if key is None:
                 return out
             title, sub, url = mr_title(project, mr), mr.get("title"), mr.get("url")
+            ctx = mr_ctx(project, mr)
         elif source == "push" and oa.get("ref") == project.get("default_branch"):
             key = "%s@%s" % (project.get("path_with_namespace"), oa.get("ref"))
             title, sub = project.get("name") or project.get("path_with_namespace"), oa.get("ref")
             url = oa.get("url")
+            ctx = branch_ctx(project, oa.get("ref"))
         else:
             return out
         m = self.mr(key, ts)
@@ -290,7 +297,7 @@ class Processor:
             else:
                 msg = "Pipeline failed"
             out.append(Signal("pipeline_failed", key, ts, title, sub, msg, url))
-        return out
+        return with_ctx(out, ctx)
 
     def note(self, body, ts):
         oa = body.get("object_attributes") or {}
@@ -301,7 +308,7 @@ class Processor:
         key = mr_key(project, mr)
         if key is None:
             return []
-        out = self.track_status(key, ts, mr, project, mr.get("url"))
+        out = with_ctx(self.track_status(key, ts, mr, project, mr.get("url")), mr_ctx(project, mr))
         # The review bot edits its notes in place constantly: only creations count.
         if oa.get("action", "create") != "create" or oa.get("system"):
             return out
@@ -310,7 +317,8 @@ class Processor:
             return out
         sig = Signal("comments", key, ts, mr_title(project, mr), mr.get("title"),
                      "%s: %s" % (actor_name(user), first_line(oa.get("note"))),
-                     oa.get("url") or mr.get("url"), user)
+                     oa.get("url") or mr.get("url"), user,
+                     dict(mr_ctx(project, mr), note_url=oa.get("url")))
         out.append(sig)
         return out
 
@@ -330,7 +338,7 @@ class Processor:
         key = "%s@%s" % (project.get("path_with_namespace"), branch)
         return [Signal("push", key, ts, project.get("name") or key, branch,
                        "%s pushed %s" % (actor_name(user), plural(n, "commit", "commits")),
-                       project.get("web_url"), user)]
+                       project.get("web_url"), user, branch_ctx(project, branch))]
 
 
 def mr_key(project, mr):
@@ -339,6 +347,23 @@ def mr_key(project, mr):
     if not path or iid is None:
         return None
     return "%s!%s" % (path, iid)
+
+
+def mr_ctx(project, mr):
+    return {"project": (project or {}).get("path_with_namespace"), "iid": (mr or {}).get("iid"),
+            "source_branch": (mr or {}).get("source_branch"), "mr_url": (mr or {}).get("url")}
+
+
+def branch_ctx(project, branch):
+    return {"project": (project or {}).get("path_with_namespace"), "source_branch": branch}
+
+
+def with_ctx(signals, ctx):
+    """Give the signals that have no context yet this one."""
+    for s in signals:
+        if s.ctx is None:
+            s.ctx = ctx
+    return signals
 
 
 def mr_title(project, mr):
@@ -368,14 +393,34 @@ class App:
     def __init__(self, path):
         self.path = path
 
+    # Notification context -> helper flag, for the action buttons' commands.
+    CONTEXT_FLAGS = (("project", "--project"), ("iid", "--iid"),
+                     ("source_branch", "--source-branch"), ("mr_url", "--mr-url"),
+                     ("note_url", "--note-url"))
+
     def send(self, n, state):
         argv = [self.path, "--title", n["title"], "--message", n["message"],
                 "--group", n["group"]]
         for k in ("subtitle", "url", "image", "thread"):
             if n.get(k):
                 argv += ["--" + k, n[k]]
+        # Button flags only when there are buttons, so a helper built before
+        # them still posts everything else.
+        extra = []
+        for a in n.get("actions") or ():
+            extra += ["--action", "%s=%s" % (a["id"], a["label"])]
+        if extra:
+            extra += ["--kind", n["kind"]]
+            ctx = n.get("context") or {}
+            for k, flag in self.CONTEXT_FLAGS:
+                if ctx.get(k) not in (None, ""):
+                    extra += [flag, str(ctx[k])]
         # Longer than the helper's own 8s wait on a first-run permission prompt.
-        r = run(argv, timeout=10)
+        r = run(argv + extra, timeout=10)
+        if r and r.returncode == 64 and extra:
+            log("GitLabNotify doesn't know action buttons (%s); rebuild it with "
+                "macos/build.sh. Posting without them." % r.stderr.strip())
+            r = run(argv, timeout=10)
         if r and r.returncode != 0:
             log("GitLabNotify exited %d: %s" % (r.returncode, r.stderr.strip()))
 
@@ -460,7 +505,8 @@ class Printer:
 
     def send(self, n, state):
         self.out.write(json.dumps({k: n.get(k) for k in (
-            "kind", "group", "thread", "title", "subtitle", "message", "url", "image")}) + "\n")
+            "kind", "group", "thread", "title", "subtitle", "message", "url", "image",
+            "actions")}) + "\n")
 
 
 class Collector:
@@ -554,6 +600,67 @@ class Avatars:
             return None
 
 
+# --- action buttons --------------------------------------------------------------
+
+ACTION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def actions_path():
+    """actions.json; GitLabNotify resolves the same path when a button is clicked."""
+    return os.path.join(default_dir("XDG_CONFIG_HOME", "~/.config"), "actions.json")
+
+
+def load_actions(path):
+    """The valid entries of actions.json, as [{id, label, kinds, command}].
+
+    Never raises: a missing file means no buttons, and a broken file or
+    entry is logged and skipped, so the notifications still go out.
+    """
+    try:
+        with open(path) as f:
+            conf = json.load(f)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as e:
+        log("%s unreadable (%s); no action buttons" % (path, e))
+        return []
+    if not isinstance(conf, dict):
+        log("%s: expected an object of actions; no action buttons" % path)
+        return []
+    out = []
+    for aid, a in conf.items():
+        a = a if isinstance(a, dict) else {}
+        label, kinds, command = a.get("label"), a.get("kinds"), a.get("command")
+        problem = None
+        if not ACTION_ID.match(aid):
+            problem = "id must be letters, digits, '.', '_' or '-'"
+        elif not isinstance(label, str) or not label.strip():
+            problem = "needs a label"
+        elif not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds):
+            problem = "kinds must be a list of notification kinds"
+        elif (not isinstance(command, list) or not command
+              or not all(isinstance(c, str) for c in command)
+              or not os.path.isabs(command[0])):
+            problem = "command must be an argv list starting with an absolute path"
+        if problem:
+            log("%s: action %r skipped: %s" % (path, aid, problem))
+            continue
+        unknown = [k for k in kinds if k not in KINDS]
+        if unknown:
+            log("%s: action %r: unknown kinds %s ignored" % (path, aid, ", ".join(unknown)))
+        out.append({"id": aid, "label": label, "kinds": [k for k in kinds if k in KINDS],
+                    "command": command})
+    return out
+
+
+def attach_actions(notes, actions):
+    """Give each notification the buttons configured for its kind."""
+    for n in notes:
+        if n.get("context"):  # backfill summaries have none, and get no buttons
+            n["actions"] = [{"id": a["id"], "label": a["label"]}
+                            for a in actions if n["kind"] in a["kinds"]]
+
+
 # --- delivery ------------------------------------------------------------------
 
 
@@ -571,7 +678,7 @@ def notification(sig, group, avatars, message=None, actor=None):
         "kind": sig.kind, "group": "gitlab-notify:" + group,
         "thread": "gitlab-notify:" + sig.key, "title": sig.title,
         "subtitle": sig.subtitle, "message": message or sig.message, "url": sig.url,
-        "image": image or icon(sig.kind),
+        "image": image or icon(sig.kind), "context": sig.ctx,
     }
 
 
@@ -765,6 +872,7 @@ def main(argv=None, stdin=None, notifier=None, now_ms=None):
         notes = [n] if n else []
     else:
         notes = deliver_live(signals, state, notifier, avatars, window_ms)
+    attach_actions(notes, load_actions(actions_path()))
 
     for i, n in enumerate(notes):
         if time.time() > deadline:

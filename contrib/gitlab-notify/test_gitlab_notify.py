@@ -35,6 +35,7 @@ def env(event, body, ts=T0, uuid=None):
 
 def mr_attrs(iid=7, **kw):
     a = {"iid": iid, "title": "Add sprockets", "state": "opened", "target_branch": "main",
+         "source_branch": "sprockets",
          "url": "https://git.example/acme/widgets/-/merge_requests/%d" % iid,
          "detailed_merge_status": "not_approved", "merge_status": "can_be_merged"}
     a.update(kw)
@@ -389,6 +390,130 @@ class AppNotifierTests(unittest.TestCase):
         gn.sys.platform = "linux"
         gn.APP_BIN = fake_helper(d)
         self.assertNotIsInstance(gn.pick_notifier("auto"), gn.App)
+
+
+def fake_helper_without_actions(d):
+    """A GitLabNotify built before action buttons: usage error on --action."""
+    path = os.path.join(d, "OldGitLabNotify")
+    with open(path, "w") as f:
+        f.write("#!/bin/sh\n"
+                "python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\" >> %s/argv\n"
+                "for a in \"$@\"; do [ \"$a\" = --action ] && "
+                "{ echo 'unknown argument --kind' >&2; exit 64; }; done\nexit 0\n" % d)
+    os.chmod(path, 0o755)
+    return path
+
+
+class ActionTests(unittest.TestCase):
+    CONF = {
+        "handle-review": {"label": "Handle Review", "kinds": ["comments", "changes_requested"],
+                          "command": ["/usr/bin/true", "--flag"]},
+        "retry": {"label": "Retry", "kinds": ["pipeline_failed"], "command": ["/usr/bin/true"]},
+    }
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.saved_env = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = self.dir
+        self.logged = []
+        self.saved_log, gn.log = gn.log, self.logged.append
+
+    def tearDown(self):
+        gn.log = self.saved_log
+        if self.saved_env is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self.saved_env
+
+    def write_conf(self, conf):
+        os.makedirs(os.path.join(self.dir, "gitlab-notify"), exist_ok=True)
+        with open(os.path.join(self.dir, "gitlab-notify", "actions.json"), "w") as f:
+            f.write(conf if isinstance(conf, str) else json.dumps(conf))
+
+    def test_matching_kinds_get_buttons_and_mr_context(self):
+        self.write_conf(self.CONF)
+        out = Harness().run([note_hook(), mr_hook("approved"), pipeline_hook("failed")])
+        by_kind = {n["kind"]: n for n in out}
+        self.assertEqual(by_kind["comments"]["actions"],
+                         [{"id": "handle-review", "label": "Handle Review"}])
+        self.assertEqual(by_kind["approved"]["actions"], [])
+        self.assertEqual(by_kind["pipeline_failed"]["actions"], [{"id": "retry", "label": "Retry"}])
+        self.assertEqual(by_kind["comments"]["context"], {
+            "project": "acme/widgets", "iid": 7, "source_branch": "sprockets",
+            "mr_url": "https://git.example/acme/widgets/-/merge_requests/7",
+            "note_url": "https://git.example/n"})
+        self.assertNotIn("note_url", by_kind["pipeline_failed"]["context"])
+
+    def test_changes_requested_from_a_note_hook_has_no_note_url(self):
+        self.write_conf(self.CONF)
+        out = Harness().run([note_hook(action="update", detailed_merge_status="requested_changes")])
+        self.assertEqual(kinds(out), ["changes_requested"])
+        self.assertEqual(out[0]["actions"], [{"id": "handle-review", "label": "Handle Review"}])
+        self.assertEqual(out[0]["context"]["iid"], 7)
+        self.assertNotIn("note_url", out[0]["context"])
+
+    def test_backfill_summary_gets_no_buttons(self):
+        self.write_conf(self.CONF)
+        out = Harness().run([note_hook()], phase="backfill")
+        self.assertEqual(kinds(out), ["summary"])
+        self.assertFalse(out[0].get("actions"))
+
+    def test_missing_or_broken_config_still_notifies_without_buttons(self):
+        out = Harness().run([note_hook()])
+        self.assertEqual(out[0]["actions"], [])
+        self.assertEqual([m for m in self.logged if "actions.json" in m], [])
+        self.write_conf("{not json")
+        out = Harness().run([note_hook()])
+        self.assertEqual(kinds(out), ["comments"])
+        self.assertEqual(out[0]["actions"], [])
+        self.assertTrue(any("unreadable" in m for m in self.logged), self.logged)
+
+    def test_bad_entries_are_skipped_and_logged(self):
+        self.write_conf({
+            "relative": {"label": "R", "kinds": ["comments"], "command": ["handle-review"]},
+            "shell": {"label": "S", "kinds": ["comments"], "command": "/bin/sh -c 'x'"},
+            "bad id!": {"label": "B", "kinds": ["comments"], "command": ["/usr/bin/true"]},
+            "nolabel": {"kinds": ["comments"], "command": ["/usr/bin/true"]},
+            "ok": {"label": "OK", "kinds": ["comments", "nonsense"], "command": ["/usr/bin/true"]},
+        })
+        actions = gn.load_actions(gn.actions_path())
+        self.assertEqual([(a["id"], a["kinds"]) for a in actions], [("ok", ["comments"])])
+        for aid in ("relative", "shell", "bad id!", "nolabel"):
+            self.assertTrue(any(repr(aid) in m and "skipped" in m for m in self.logged), aid)
+        self.assertTrue(any("unknown kinds nonsense" in m for m in self.logged), self.logged)
+
+    def test_app_passes_buttons_and_context_as_flags(self):
+        d = tempfile.mkdtemp()
+        n = {"kind": "comments", "group": "gitlab-notify:g", "title": "T", "message": "M",
+             "url": "https://git.example/n", "image": None,
+             "actions": [{"id": "handle-review", "label": "Handle Review"}],
+             "context": {"project": "acme/widgets", "iid": 7, "source_branch": "sprockets",
+                         "mr_url": "https://git.example/mr/7", "note_url": None}}
+        gn.App(fake_helper(d)).send(n, gn.empty_state())
+        gn.App(fake_helper(d)).send(dict(n, actions=[]), gn.empty_state())
+        with open(os.path.join(d, "argv")) as f:
+            runs = [json.loads(line) for line in f]
+        self.assertEqual(runs[0], [
+            "--title", "T", "--message", "M", "--group", "gitlab-notify:g",
+            "--url", "https://git.example/n", "--action", "handle-review=Handle Review",
+            "--kind", "comments", "--project", "acme/widgets", "--iid", "7",
+            "--source-branch", "sprockets", "--mr-url", "https://git.example/mr/7"])
+        # No buttons, no button flags: an older helper still takes it.
+        self.assertEqual(runs[1], ["--title", "T", "--message", "M", "--group", "gitlab-notify:g",
+                                   "--url", "https://git.example/n"])
+
+    def test_helper_without_buttons_reposts_plain(self):
+        d = tempfile.mkdtemp()
+        n = {"kind": "comments", "group": "g", "title": "T", "message": "M",
+             "actions": [{"id": "a", "label": "A"}], "context": {"project": "acme/widgets"}}
+        gn.App(fake_helper_without_actions(d)).send(n, gn.empty_state())
+        with open(os.path.join(d, "argv")) as f:
+            runs = [json.loads(line) for line in f]
+        self.assertEqual(len(runs), 2)
+        self.assertIn("--action", runs[0])
+        self.assertEqual(runs[1], ["--title", "T", "--message", "M", "--group", "g"])
+        self.assertTrue(any("rebuild" in m for m in self.logged), self.logged)
+        self.assertFalse(any("exited" in m for m in self.logged), self.logged)
 
 
 if __name__ == "__main__":
