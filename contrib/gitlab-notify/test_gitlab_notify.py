@@ -315,5 +315,69 @@ class AvatarTests(unittest.TestCase):
         self.assertTrue(gn.notification(sigs[-1], "g", av)["image"].endswith("pipeline_failed.png"))
 
 
+def fake_helper(d, rc=0):
+    """A stand-in for GitLabNotify that records its argv, one JSON line per run."""
+    path = os.path.join(d, "GitLabNotify")
+    with open(path, "w") as f:
+        f.write("#!/bin/sh\n"
+                "python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\" >> %s/argv\n"
+                "echo boom >&2\nexit %d\n" % (d, rc))
+    os.chmod(path, 0o755)
+    return path
+
+
+class AppNotifierTests(unittest.TestCase):
+    def setUp(self):
+        self.saved = (gn.APP_BIN, gn.sys.platform)
+
+    def tearDown(self):
+        gn.APP_BIN, gn.sys.platform = self.saved
+
+    def test_passes_the_notification_as_flags(self):
+        d = tempfile.mkdtemp()
+        app = gn.App(fake_helper(d))
+        app.send({"kind": "pipeline_failed", "group": "gitlab-notify:g", "title": "T",
+                  "subtitle": "S", "message": "M", "url": "https://git.example/u",
+                  "image": "/i.png"}, gn.empty_state())
+        app.send({"kind": "closed", "group": "gitlab-notify:h", "title": "T2",
+                  "subtitle": None, "message": "M2", "url": None, "image": None},
+                 gn.empty_state())
+        with open(os.path.join(d, "argv")) as f:
+            runs = [json.loads(line) for line in f]
+        self.assertEqual(runs[0], ["--title", "T", "--message", "M", "--group", "gitlab-notify:g",
+                                   "--subtitle", "S", "--url", "https://git.example/u",
+                                   "--image", "/i.png"])
+        self.assertEqual(runs[1], ["--title", "T2", "--message", "M2", "--group", "gitlab-notify:h"])
+
+    def test_helper_failure_never_fails_the_batch(self):
+        d = tempfile.mkdtemp()
+        logged = []
+        gn.log, saved = logged.append, gn.log
+        try:
+            stdin = io.StringIO(json.dumps(pipeline_hook("failed")) + "\n")
+            rc = gn.main(["--phase", "live", "--state-dir", d, "--cache-dir", d, "--no-avatars"],
+                         stdin=stdin, notifier=gn.App(fake_helper(d, rc=2)), now_ms=T0)
+            gn.App(os.path.join(d, "missing")).send(
+                {"group": "g", "title": "T", "message": "M"}, gn.empty_state())
+        finally:
+            gn.log = saved
+        self.assertEqual(rc, 0)
+        self.assertTrue(any("exited 2: boom" in m for m in logged), logged)
+        self.assertTrue(any("missing failed" in m for m in logged), logged)
+
+    def test_auto_prefers_the_built_app_on_macos(self):
+        d = tempfile.mkdtemp()
+        gn.sys.platform = "darwin"
+        gn.APP_BIN = fake_helper(d)
+        n = gn.pick_notifier("auto")
+        self.assertIsInstance(n, gn.App)
+        self.assertEqual(n.path, gn.APP_BIN)
+        gn.APP_BIN = os.path.join(d, "not-built")
+        self.assertNotIsInstance(gn.pick_notifier("auto"), gn.App)
+        gn.sys.platform = "linux"
+        gn.APP_BIN = fake_helper(d)
+        self.assertNotIsInstance(gn.pick_notifier("auto"), gn.App)
+
+
 if __name__ == "__main__":
     unittest.main()

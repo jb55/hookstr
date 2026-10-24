@@ -31,6 +31,8 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(HERE, "icons")
+# The macOS helper app, built by macos/build.sh.
+APP_BIN = os.path.join(HERE, "macos", "build", "GitLabNotify.app", "Contents", "MacOS", "GitLabNotify")
 
 DAY_MS = 24 * 3600 * 1000
 SEEN_TTL_MS = 14 * DAY_MS
@@ -356,6 +358,28 @@ def run(argv, timeout=5):
         return None
 
 
+class App:
+    """GitLabNotify.app (macos/): our own icon on the left, the image as an
+    attachment, click to open."""
+
+    name = "app"
+    replace = True  # the group is the request identifier: a repost replaces it
+
+    def __init__(self, path):
+        self.path = path
+
+    def send(self, n, state):
+        argv = [self.path, "--title", n["title"], "--message", n["message"],
+                "--group", n["group"]]
+        for k in ("subtitle", "url", "image"):
+            if n.get(k):
+                argv += ["--" + k, n[k]]
+        # Longer than the helper's own 8s wait on a first-run permission prompt.
+        r = run(argv, timeout=10)
+        if r and r.returncode != 0:
+            log("GitLabNotify exited %d: %s" % (r.returncode, r.stderr.strip()))
+
+
 class TerminalNotifier:
     name = "terminal-notifier"
     replace = True  # -group replaces the previous notification in place
@@ -455,6 +479,9 @@ class Collector:
 def pick_notifier(choice):
     if choice == "none":
         return None
+    if choice == "app" or (choice == "auto" and sys.platform == "darwin"
+                           and os.access(APP_BIN, os.X_OK)):
+        return App(APP_BIN)
     tn, ns = shutil.which("terminal-notifier"), shutil.which("notify-send")
     if choice == "terminal-notifier" or (choice == "auto" and sys.platform == "darwin" and tn):
         return TerminalNotifier(tn or "terminal-notifier")
@@ -681,7 +708,7 @@ def main(argv=None, stdin=None, notifier=None, now_ms=None):
     p.add_argument("--phase", choices=("backfill", "live"),
                    help="override $HOOKSTR_PHASE (default live)")
     p.add_argument("--notifier", default="auto",
-                   choices=("auto", "terminal-notifier", "osascript", "notify-send", "none"))
+                   choices=("auto", "app", "terminal-notifier", "osascript", "notify-send", "none"))
     p.add_argument("--me", help="your GitLab username: skip your own comments and approvals")
     p.add_argument("--window", default="60s",
                    help="per-MR comment digest quiet window (default 60s)")

@@ -80,18 +80,23 @@ its own notification.
 
 ## Notifiers
 
-`--notifier auto` (the default) picks, in order: `terminal-notifier` on
-macOS when it's on PATH, else `osascript`; `notify-send` elsewhere. If
-none is available, it prints the notifications to stdout.
+`--notifier auto` (the default) picks, in order: on macOS the
+GitLabNotify helper app when it's been built (see below), else
+`terminal-notifier` when it's on PATH, else `osascript`; `notify-send`
+elsewhere. If none is available, it prints the notifications to stdout.
 
-What works on macOS 26.6 (checked by hand, with terminal-notifier 2.0.0):
+What works on macOS 26.6 (checked by hand):
 
-- **terminal-notifier** is the one to install (`brew install
-  terminal-notifier`). `-group` replaces a notification in place across
-  batches, `-open <url>` opens the MR on click, and `-contentImage <png>`
-  shows the signal icon or avatar as the thumbnail on the right. The
-  left-hand icon is terminal-notifier's own (a Terminal icon). The script
-  doesn't pass `-appIcon`, which relies on private API.
+- **GitLabNotify.app** (`--notifier app`), a small signed helper in
+  `macos/`, is the one to use. Our own icon on the left, the signal icon
+  or avatar as a thumbnail on the right, in-place replacement across
+  batches, and a click opens the MR, also after the helper has exited.
+- **terminal-notifier** 2.0.0 (`brew install terminal-notifier`):
+  `-group` replaces in place, `-open <url>` opens the MR on click, and
+  `-contentImage <png>` shows the thumbnail. The left-hand icon is always
+  terminal-notifier's own (a Terminal icon): `-appIcon` was tried on 26.6
+  and has no effect, and `-sender` borrows another app's icon but breaks
+  click-to-open.
 - **osascript** `display notification` works with no install, but shows
   the Script Editor icon, takes no image and no click URL, and can't
   replace, hence the cooldown digest.
@@ -99,15 +104,48 @@ What works on macOS 26.6 (checked by hand, with terminal-notifier 2.0.0):
   `-p`/`-r` to replace in place (libnotify ≥ 0.7.9), `-u critical` for
   pipeline failures and conflicts. The replace ids live in the state file.
 
-A proper left-hand icon on macOS would need a small signed helper app of
-our own (UNUserNotificationCenter, its own bundle icon, image attachments,
-click-to-open). That is not built here.
+### The macOS helper app
+
+```
+contrib/gitlab-notify/macos/build.sh
+```
+
+builds `macos/build/GitLabNotify.app` (not committed) with the Command Line
+Tools' `swiftc`, no Xcode project: `main.swift`, `Info.plist` (`LSUIElement`,
+so no Dock icon), and an `.icns` made from `icons/app.png` with `sips` and
+`iconutil`. It signs the bundle with `$CODESIGN_IDENTITY` (default: the
+author's Apple Development certificate; `security find-identity -v -p
+codesigning` lists yours, `-` signs ad hoc) and registers it with
+LaunchServices. Until it's registered, posting fails with "Notifications
+are not allowed for this application". `$SWIFT_DEVELOPER_DIR` picks the
+toolchain (default `/Library/Developer/CommandLineTools`; a nix shell's
+`DEVELOPER_DIR` has no `swiftc`).
+
+The script runs the bundle's executable once per notification:
+
+```
+GitLabNotify.app/Contents/MacOS/GitLabNotify --title T --message M \
+    [--subtitle S] [--url U] [--image PNG] [--group G]
+```
+
+It posts through `UNUserNotificationCenter` with the group as the request
+identifier, so a later post with the same group replaces the earlier one
+(with a fresh banner). The image goes in as an attachment, from a temp copy,
+since attaching moves the file. The url rides in `userInfo`; on a click
+macOS relaunches the app with no arguments, and it opens the url and exits.
+Exit status: 0 posted, 2 notifications not allowed, 3 failed, 64 usage;
+the script logs a non-zero exit and carries on.
+
+The first post asks for permission (`GitLabNotify --authorize` asks without
+posting); allow it. A Focus mode holds the banners back but still
+updates Notification Center.
 
 ## Icons and avatars
 
 `icons/*.png` are drawn for this project by `make-icons.py` (stdlib only;
 rerun it after changing a shape or colour). There's one per signal, plus a
-summary that uses the worst signal's icon.
+summary that uses the worst signal's icon, and `app.png`, the helper app's
+icon.
 
 For comments, approvals and review requests, the actor's `avatar_url` is
 fetched (3s timeout, at most 2 MB, image content types only) and cached as

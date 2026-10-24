@@ -117,10 +117,22 @@ def cover(d, px):
     return max(0.0, min(1.0, 0.5 - d / px))
 
 
-def render(disc, layers, size=SIZE):
+# The helper app's bundle icon (macos/build.sh turns it into an .icns): a
+# merge glyph on macOS's rounded-square icon plate (824 of 1024 px), with
+# an unread dot.
+APP_SIZE = 1024
+APP = ((84, 72, 200), [
+    (union(segment(-0.3, -0.4, -0.3, 0.4, 0.07),
+           polyline([(0.25, 0.4), (0.25, 0.02), (-0.3, -0.36)], 0.07)), WHITE),
+    (circle(-0.3, -0.4, 0.12), WHITE), (circle(-0.3, 0.4, 0.12), WHITE),
+    (circle(0.25, 0.4, 0.12), WHITE),
+    (circle(0.4, -0.4, 0.17), (240, 120, 40))])
+APP_PLATE = rounded_rect(0, 0, 0.805, 0.805, 0.36)
+
+
+def render(disc, layers, size=SIZE, bg=circle(0, 0, 0.94)):
     px = 2.0 / size
     out = bytearray(size * size * 4)
-    bg = circle(0, 0, 0.94)
     for j in range(size):
         y = (j + 0.5) * px - 1
         for i in range(size):
@@ -145,6 +157,8 @@ def main():
     for kind, (disc, layers) in ICONS.items():
         png(os.path.join(here, kind + ".png"), SIZE, SIZE, render(disc, layers))
         print(kind)
+    png(os.path.join(here, "app.png"), APP_SIZE, APP_SIZE, render(*APP, APP_SIZE, APP_PLATE))
+    print("app")
 
 
 if __name__ == "__main__":
