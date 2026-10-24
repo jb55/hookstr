@@ -3,11 +3,12 @@
 // left-hand icon; terminal-notifier always shows its own.
 //
 //   GitLabNotify.app/Contents/MacOS/GitLabNotify --title T --message M
-//       [--subtitle S] [--url U] [--image PNG] [--group G]
+//       [--subtitle S] [--url U] [--image PNG] [--group G] [--thread T]
 //   GitLabNotify.app/Contents/MacOS/GitLabNotify --authorize
 //
 // Posting exits once the notification is added. The request's identifier
 // is the group, so a later post with the same group replaces it in place.
+// The thread (default: the group) stacks posts in Notification Center.
 // When the user clicks one, macOS launches the app again with no
 // arguments and hands the delegate the response: it opens the url and
 // exits. Exit status: 0 posted, 2 not allowed, 3 failed, 64 usage.
@@ -16,7 +17,7 @@ import AppKit
 import UserNotifications
 
 struct Post {
-    var title = "", subtitle = "", message = "", url = "", image = "", group = ""
+    var title = "", subtitle = "", message = "", url = "", image = "", group = "", thread = ""
 }
 
 enum Mode {
@@ -45,6 +46,7 @@ func parse(_ args: [String]) -> Mode {
         case "--url": p.url = v
         case "--image": p.image = v
         case "--group": p.group = v
+        case "--thread": p.thread = v
         default: fail(64, "unknown argument \(args[i])")
         }
         i += 2
@@ -102,7 +104,8 @@ final class Delegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterD
         c.subtitle = p.subtitle
         c.body = p.message
         if !p.url.isEmpty { c.userInfo = ["url": p.url] }
-        if !p.group.isEmpty { c.threadIdentifier = p.group }
+        let thread = p.thread.isEmpty ? p.group : p.thread
+        if !thread.isEmpty { c.threadIdentifier = thread }
         if !p.image.isEmpty {
             // Adding an attachment moves its file into the notification
             // store, so hand it a copy, never the caller's file.

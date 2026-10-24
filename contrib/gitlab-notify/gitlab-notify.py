@@ -371,7 +371,7 @@ class App:
     def send(self, n, state):
         argv = [self.path, "--title", n["title"], "--message", n["message"],
                 "--group", n["group"]]
-        for k in ("subtitle", "url", "image"):
+        for k in ("subtitle", "url", "image", "thread"):
             if n.get(k):
                 argv += ["--" + k, n[k]]
         # Longer than the helper's own 8s wait on a first-run permission prompt.
@@ -460,7 +460,7 @@ class Printer:
 
     def send(self, n, state):
         self.out.write(json.dumps({k: n.get(k) for k in (
-            "kind", "group", "title", "subtitle", "message", "url", "image")}) + "\n")
+            "kind", "group", "thread", "title", "subtitle", "message", "url", "image")}) + "\n")
 
 
 class Collector:
@@ -567,7 +567,9 @@ def notification(sig, group, avatars, message=None, actor=None):
     if sig.kind in AVATAR_KINDS and avatars:
         image = avatars.get(actor if actor is not None else sig.actor)
     return {
-        "kind": sig.kind, "group": "gitlab-notify:" + group, "title": sig.title,
+        # thread: one Notification Center stack per MR (or branch), across kinds.
+        "kind": sig.kind, "group": "gitlab-notify:" + group,
+        "thread": "gitlab-notify:" + sig.key, "title": sig.title,
         "subtitle": sig.subtitle, "message": message or sig.message, "url": sig.url,
         "image": image or icon(sig.kind),
     }

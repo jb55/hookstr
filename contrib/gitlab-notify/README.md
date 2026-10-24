@@ -125,12 +125,15 @@ The script runs the bundle's executable once per notification:
 
 ```
 GitLabNotify.app/Contents/MacOS/GitLabNotify --title T --message M \
-    [--subtitle S] [--url U] [--image PNG] [--group G]
+    [--subtitle S] [--url U] [--image PNG] [--group G] [--thread T]
 ```
 
 It posts through `UNUserNotificationCenter` with the group as the request
 identifier, so a later post with the same group replaces the earlier one
-(with a fresh banner). The image goes in as an attachment, from a temp copy,
+(with a fresh banner). The thread is the MR (or the branch, for pushes and
+default-branch pipelines), so one MR's pipeline, approval and comment
+digest stack together in Notification Center, while each keeps its own
+group and replaces only itself. The image goes in as an attachment, from a temp copy,
 since attaching moves the file. The url rides in `userInfo`; on a click
 macOS relaunches the app with no arguments, and it opens the url and exits.
 Exit status: 0 posted, 2 notifications not allowed, 3 failed, 64 usage;

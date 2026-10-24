@@ -315,6 +315,18 @@ class AvatarTests(unittest.TestCase):
         self.assertTrue(gn.notification(sigs[-1], "g", av)["image"].endswith("pipeline_failed.png"))
 
 
+class ThreadTests(unittest.TestCase):
+    def test_one_thread_per_mr_across_kinds(self):
+        h = Harness()
+        sent = h.run([pipeline_hook("failed"), note_hook(), mr_hook("approved"),
+                      note_hook(iid=8)])
+        threads = {n["kind"]: n["thread"] for n in sent if "!7" in n["group"]}
+        self.assertEqual(set(threads), {"pipeline_failed", "comments", "approved"})
+        self.assertEqual(set(threads.values()), {"gitlab-notify:acme/widgets!7"})
+        self.assertEqual(len({n["group"] for n in sent if "!7" in n["group"]}), 3)
+        self.assertIn("gitlab-notify:acme/widgets!8", [n["thread"] for n in sent])
+
+
 def fake_helper(d, rc=0):
     """A stand-in for GitLabNotify that records its argv, one JSON line per run."""
     path = os.path.join(d, "GitLabNotify")
@@ -338,7 +350,7 @@ class AppNotifierTests(unittest.TestCase):
         app = gn.App(fake_helper(d))
         app.send({"kind": "pipeline_failed", "group": "gitlab-notify:g", "title": "T",
                   "subtitle": "S", "message": "M", "url": "https://git.example/u",
-                  "image": "/i.png"}, gn.empty_state())
+                  "image": "/i.png", "thread": "gitlab-notify:acme/widgets!7"}, gn.empty_state())
         app.send({"kind": "closed", "group": "gitlab-notify:h", "title": "T2",
                   "subtitle": None, "message": "M2", "url": None, "image": None},
                  gn.empty_state())
@@ -346,7 +358,7 @@ class AppNotifierTests(unittest.TestCase):
             runs = [json.loads(line) for line in f]
         self.assertEqual(runs[0], ["--title", "T", "--message", "M", "--group", "gitlab-notify:g",
                                    "--subtitle", "S", "--url", "https://git.example/u",
-                                   "--image", "/i.png"])
+                                   "--image", "/i.png", "--thread", "gitlab-notify:acme/widgets!7"])
         self.assertEqual(runs[1], ["--title", "T2", "--message", "M2", "--group", "gitlab-notify:h"])
 
     def test_helper_failure_never_fails_the_batch(self):
