@@ -125,12 +125,14 @@ approval and comment digest stack together in Notification Center, while
 each keeps its own group and replaces only itself. A non-zero exit is
 logged and the batch carries on.
 
-For comments, approvals and review requests with a fetched avatar (below),
-the script passes it as `--avatar` with the person's name as `--sender`,
-and the signal icon as the thumbnail. A nudge built with its provisioning
-profile shows the avatar as the main icon, with the person's name as the
-first line and the MR below it (see nudge's README); without one, it
-posts a plain notification.
+The main icon says who it's from: for comments, approvals and review
+requests with a fetched avatar (below), the person (`--avatar` their
+avatar, `--sender` their name); for everything else, and backfill
+summaries, GitLab itself (the instance's icon, `--sender GitLab`). The
+signal icon is the thumbnail. A nudge built with its provisioning profile
+shows the avatar as the main icon with its bell as a badge, the sender as
+the first line and the MR below it (see nudge's README); without one, it
+posts a plain notification with the bell.
 
 `--avatar`, `--action` and `--env` are passed only when used, so a nudge
 built before them still posts everything else; when it rejects them (exit
@@ -208,6 +210,12 @@ fetched (and shown as the main icon by nudge, or as the thumbnail by the
 other notifiers) (3s timeout, at most 2 MB, image content types only) and cached as
 `~/.cache/gitlab-notify/avatars/<user id>.<ext>` for 7 days. A failed fetch
 is remembered for an hour and falls back to the signal icon.
+
+The GitLab icon is the instance's own, so a self-hosted GitLab shows its
+custom icon: the largest non-maskable icon in its web app manifest
+(`https://<host>/-/manifest.json`), else `/favicon.png`. It's fetched from
+the host of the notification's URL and cached the same way, as
+`avatars/site-<host>.<ext>`. No GitLab artwork is committed here.
 
 ## Trying it out
 

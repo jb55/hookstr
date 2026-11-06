@@ -328,6 +328,75 @@ class ThreadTests(unittest.TestCase):
         self.assertIn("gitlab-notify:acme/widgets!8", [n["thread"] for n in sent])
 
 
+class InstanceIconTests(unittest.TestCase):
+    """The GitLab instance's icon, from a local stand-in server."""
+
+    PNG = b"\x89PNG\r\n\x1a\nlogo"
+
+    def serve(self, routes):
+        import http.server
+        import threading
+        png = self.PNG
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = routes.get(self.path)
+                if body is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png" if body == png else "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        return "http://127.0.0.1:%d" % srv.server_address[1]
+
+    def test_largest_non_maskable_manifest_icon_cached(self):
+        manifest = json.dumps({"icons": [
+            {"src": "/-/pwa-icons/logo-192.png", "sizes": "192x192"},
+            {"src": "/-/pwa-icons/logo-512.png", "sizes": "512x512"},
+            {"src": "/-/pwa-icons/maskable.png", "sizes": "1024x1024", "purpose": "maskable"}]}).encode()
+        base = self.serve({"/-/manifest.json": manifest, "/-/pwa-icons/logo-512.png": self.PNG})
+        d = tempfile.mkdtemp()
+        p = gn.Avatars(d).instance(base + "/acme/widgets/-/merge_requests/7")
+        with open(p, "rb") as f:
+            self.assertEqual(f.read(), self.PNG)
+        # Cached per host: a later run doesn't fetch, even with fetching off.
+        self.assertEqual(gn.Avatars(d, fetch=False).instance(base + "/other/-/pipelines/1"), p)
+
+    def test_no_manifest_falls_back_to_favicon(self):
+        base = self.serve({"/favicon.png": self.PNG})
+        p = gn.Avatars(tempfile.mkdtemp()).instance(base + "/acme/widgets")
+        with open(p, "rb") as f:
+            self.assertEqual(f.read(), self.PNG)
+
+    def test_bad_urls_and_failures_are_none(self):
+        av = gn.Avatars(tempfile.mkdtemp(), timeout=0.5)
+        self.assertIsNone(av.instance(None))
+        self.assertIsNone(av.instance("mailto:x@example.com"))
+        self.assertIsNone(av.instance("http://127.0.0.1:9/acme"))
+
+    def test_gitlab_icon_only_where_no_person_avatar(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "avatars"))
+        for name in ("12.png", "site-git.example.png"):
+            open(os.path.join(d, "avatars", name), "wb").close()
+        av = gn.Avatars(d, fetch=False)
+        pipe = gn.notification(gn.Processor(gn.empty_state()).handle(pipeline_hook("failed"))[-1], "p", av)
+        self.assertTrue(pipe["avatar"].endswith("site-git.example.png"))
+        self.assertEqual(pipe["sender"], "GitLab")
+        self.assertTrue(pipe["image"].endswith("pipeline_failed.png"))  # never the GitLab icon
+        note = gn.notification(gn.Processor(gn.empty_state()).handle(note_hook(user=BOB))[-1], "c", av)
+        self.assertEqual((os.path.basename(note["avatar"]), note["sender"]), ("12.png", "Bob"))
+
+
 def fake_helper(d, rc=0):
     """A stand-in for nudge that records its argv, one JSON line per run."""
     path = os.path.join(d, "Nudge")

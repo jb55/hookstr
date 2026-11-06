@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -559,7 +560,8 @@ def pick_notifier(choice):
 
 
 class Avatars:
-    """The actor's avatar as a local file, or None. Never raises, never waits long."""
+    """The actor's avatar, or the GitLab instance's icon, as a local file, or
+    None. Never raises, never waits long."""
 
     TTL = 7 * 24 * 3600
     FAIL_TTL = 3600
@@ -582,7 +584,42 @@ class Avatars:
             self.memo[uid] = self.lookup(uid, url)
         return self.memo[uid]
 
+    def instance(self, web_url):
+        """The icon of the GitLab instance serving `web_url`, from its web app
+        manifest, so a self-hosted instance's own icon shows too."""
+        u = urllib.parse.urlsplit(web_url or "")
+        if u.scheme not in ("http", "https") or not u.netloc:
+            return None
+        key = "site-" + re.sub(r"[^A-Za-z0-9.-]", "_", u.netloc)
+        if key not in self.memo:
+            base = "%s://%s/" % (u.scheme, u.netloc)
+            self.memo[key] = self.lookup(key, lambda: self.manifest_icon(base))
+        return self.memo[key]
+
+    def manifest_icon(self, base):
+        """The largest non-maskable icon in the instance's /-/manifest.json,
+        else its favicon."""
+        try:
+            req = urllib.request.Request(urllib.parse.urljoin(base, "-/manifest.json"),
+                                         headers={"User-Agent": "gitlab-notify"})
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                icons = json.loads(r.read(256 * 1024)).get("icons") or []
+            def size(i):
+                try:
+                    return int(str(i.get("sizes", "0")).split("x")[0])
+                except ValueError:
+                    return 0
+            icons = [i for i in icons if isinstance(i, dict) and i.get("src")
+                     and "maskable" not in str(i.get("purpose", ""))]
+            if icons:
+                return urllib.parse.urljoin(base, max(icons, key=size)["src"])
+        except Exception as e:
+            log("manifest %s: %s" % (base, e))
+        return urllib.parse.urljoin(base, "favicon.png")
+
     def lookup(self, uid, url):
+        """`url` is the image's URL, or a function finding it, called only
+        when the cache can't answer."""
         now = time.time()
         for ext in ("png", "jpg", "gif", "webp"):
             p = os.path.join(self.dir, "%s.%s" % (uid, ext))
@@ -595,6 +632,7 @@ class Avatars:
             return None
         try:
             os.makedirs(self.dir, exist_ok=True)
+            url = url() if callable(url) else url
             req = urllib.request.Request(url, headers={"User-Agent": "gitlab-notify"})
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 ctype = r.headers.get_content_type()
@@ -688,15 +726,22 @@ def icon(kind):
     return p if os.path.exists(p) else None
 
 
+GITLAB = "GitLab"
+
+
 def notification(sig, group, avatars, message=None, actor=None):
     actor = actor if actor is not None else sig.actor
     image = None
     if sig.kind in AVATAR_KINDS and avatars:
         image = avatars.get(actor)
+    # avatar: who it's from, for notifiers that show it apart from the image
+    # (nudge): the person, else GitLab itself. Others show a person's avatar
+    # as the image, and never the GitLab icon.
+    avatar, sender = image, actor_name(actor) if image else None
+    if not avatar and avatars:
+        avatar, sender = avatars.instance(sig.url), GITLAB
     return {
-        # avatar: the person behind it, for notifiers that can show them
-        # apart from the image (nudge). Others show the avatar as the image.
-        "avatar": image, "sender": actor_name(actor) if image else None,
+        "avatar": avatar, "sender": sender if avatar else None,
         # thread: one Notification Center stack per MR (or branch), across kinds.
         "kind": sig.kind, "group": "gitlab-notify:" + group,
         "thread": "gitlab-notify:" + sig.key, "title": sig.title,
@@ -892,6 +937,9 @@ def main(argv=None, stdin=None, notifier=None, now_ms=None):
 
     if phase == "backfill":
         n = summarize(signals)
+        if n:
+            n["avatar"] = avatars.instance(signals[0].url)
+            n["sender"] = GITLAB if n["avatar"] else None
         notes = [n] if n else []
     else:
         notes = deliver_live(signals, state, notifier, avatars, window_ms)
