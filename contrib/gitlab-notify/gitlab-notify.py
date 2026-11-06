@@ -394,8 +394,9 @@ def nudge_bin():
 
 
 class Nudge:
-    """Nudge.app: its own icon on the left, the image as an attachment,
-    click to open, and the action buttons."""
+    """Nudge.app: its own icon on the left (or the person's avatar, with the
+    icon as a badge), the image as an attachment, click to open, and the
+    action buttons."""
 
     name = "nudge"
     replace = True  # the group is the request identifier: a repost replaces it
@@ -411,15 +412,21 @@ class Nudge:
     def send(self, n, state):
         argv = [self.path, "--title", n["title"], "--message", n["message"],
                 "--group", n["group"]]
-        for k in ("subtitle", "url", "image", "thread"):
+        for k in ("subtitle", "url", "thread"):
             if n.get(k):
                 argv += ["--" + k, n[k]]
-        # Button flags only when there are buttons, so a nudge built before
+        # With the avatar on the left, the thumbnail goes back to the signal icon.
+        image = (icon(n["kind"]) or n.get("image")) if n.get("avatar") else n.get("image")
+        if image:
+            argv += ["--image", image]
+        # Avatar and button flags only when used, so a nudge built before
         # them still posts everything else.
         extra = []
+        if n.get("avatar"):
+            extra += ["--avatar", n["avatar"], "--sender", n.get("sender") or n["title"]]
         for a in n.get("actions") or ():
             extra += ["--action", "%s=%s" % (a["id"], a["label"])]
-        if extra:
+        if n.get("actions"):
             extra += ["--env", "GITLAB_NOTIFY_KIND=" + n["kind"]]
             ctx = n.get("context") or {}
             for k, var in self.CONTEXT_ENV:
@@ -428,7 +435,7 @@ class Nudge:
         # Longer than the helper's own 8s wait on a first-run permission prompt.
         r = run(argv + extra, timeout=10)
         if r and r.returncode == 64 and extra:
-            log("nudge doesn't know action buttons (%s); update it. "
+            log("nudge doesn't know avatars or action buttons (%s); update it. "
                 "Posting without them." % r.stderr.strip())
             r = run(argv, timeout=10)
         if r and r.returncode != 0:
@@ -515,7 +522,7 @@ class Printer:
 
     def send(self, n, state):
         self.out.write(json.dumps({k: n.get(k) for k in (
-            "kind", "group", "thread", "title", "subtitle", "message", "url", "image",
+            "kind", "group", "thread", "title", "subtitle", "message", "url", "image", "avatar",
             "actions")}) + "\n")
 
 
@@ -682,10 +689,14 @@ def icon(kind):
 
 
 def notification(sig, group, avatars, message=None, actor=None):
+    actor = actor if actor is not None else sig.actor
     image = None
     if sig.kind in AVATAR_KINDS and avatars:
-        image = avatars.get(actor if actor is not None else sig.actor)
+        image = avatars.get(actor)
     return {
+        # avatar: the person behind it, for notifiers that can show them
+        # apart from the image (nudge). Others show the avatar as the image.
+        "avatar": image, "sender": actor_name(actor) if image else None,
         # thread: one Notification Center stack per MR (or branch), across kinds.
         "kind": sig.kind, "group": "gitlab-notify:" + group,
         "thread": "gitlab-notify:" + sig.key, "title": sig.title,

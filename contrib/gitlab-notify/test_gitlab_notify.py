@@ -359,7 +359,7 @@ class AppNotifierTests(unittest.TestCase):
             runs = [json.loads(line) for line in f]
         self.assertEqual(runs[0], ["--title", "T", "--message", "M", "--group", "gitlab-notify:g",
                                    "--subtitle", "S", "--url", "https://git.example/u",
-                                   "--image", "/i.png", "--thread", "gitlab-notify:acme/widgets!7"])
+                                   "--thread", "gitlab-notify:acme/widgets!7", "--image", "/i.png"])
         self.assertEqual(runs[1], ["--title", "T2", "--message", "M2", "--group", "gitlab-notify:h"])
 
     def test_helper_failure_never_fails_the_batch(self):
@@ -391,6 +391,26 @@ class AppNotifierTests(unittest.TestCase):
         gn.sys.platform = "linux"
         gn.nudge_bin = lambda: helper
         self.assertNotIsInstance(gn.pick_notifier("auto"), gn.Nudge)
+
+    def test_avatar_goes_left_and_the_signal_icon_becomes_the_thumbnail(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "avatars"))
+        open(os.path.join(d, "avatars", "12.png"), "wb").close()
+        sig = gn.Processor(gn.empty_state()).handle(note_hook(user=BOB))[-1]
+        n = gn.notification(sig, "g", gn.Avatars(d, fetch=False))
+        self.assertEqual((n["sender"], n["image"]), ("Bob", n["avatar"]))
+        gn.Nudge(fake_helper(d)).send(n, gn.empty_state())
+        pipe = gn.notification(gn.Processor(gn.empty_state()).handle(pipeline_hook("failed"))[-1],
+                               "p", gn.Avatars(d, fetch=False))
+        self.assertIsNone(pipe["avatar"])
+        gn.Nudge(fake_helper(d)).send(pipe, gn.empty_state())
+        with open(os.path.join(d, "argv")) as f:
+            runs = [json.loads(line) for line in f]
+        self.assertEqual(runs[0][runs[0].index("--image") + 1], gn.icon("comments"))
+        self.assertEqual(runs[0][runs[0].index("--avatar"):],
+                         ["--avatar", n["avatar"], "--sender", "Bob"])
+        self.assertNotIn("--avatar", runs[1])
+        self.assertEqual(runs[1][runs[1].index("--image") + 1], gn.icon("pipeline_failed"))
 
     def test_finds_nudge_app_from_env_then_installed(self):
         d = tempfile.mkdtemp()

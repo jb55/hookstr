@@ -114,7 +114,8 @@ executable once per notification:
 
 ```
 Nudge.app/Contents/MacOS/Nudge --title T --message M --group G --thread T \
-    [--subtitle S] [--url U] [--image PNG] [--action ID=LABEL]... [--env KEY=VALUE]...
+    [--subtitle S] [--url U] [--image PNG] [--avatar PNG --sender NAME] \
+    [--action ID=LABEL]... [--env KEY=VALUE]...
 ```
 
 The group is the notification's identity, so a later one with the same
@@ -124,10 +125,16 @@ approval and comment digest stack together in Notification Center, while
 each keeps its own group and replaces only itself. A non-zero exit is
 logged and the batch carries on.
 
-`--action` and `--env` are for action buttons (below). The script passes
-them only when a notification has buttons, so a nudge built before them
-still posts everything else; when it rejects them (exit 64) the script
-logs "update it" and posts again without buttons.
+For comments, approvals and review requests with a fetched avatar (below),
+the script passes it as `--avatar` with the person's name as `--sender`,
+and the signal icon as the thumbnail. A nudge built with its provisioning
+profile shows the avatar as the main icon, with the person's name as the
+first line and the MR below it (see nudge's README); without one, it
+posts a plain notification.
+
+`--avatar`, `--action` and `--env` are passed only when used, so a nudge
+built before them still posts everything else; when it rejects them (exit
+64) the script logs "update it" and posts again without them.
 
 ### Action buttons
 
@@ -197,7 +204,8 @@ rerun it after changing a shape or colour). There's one per signal, plus a
 summary that uses the worst signal's icon.
 
 For comments, approvals and review requests, the actor's `avatar_url` is
-fetched (3s timeout, at most 2 MB, image content types only) and cached as
+fetched (and shown as the main icon by nudge, or as the thumbnail by the
+other notifiers) (3s timeout, at most 2 MB, image content types only) and cached as
 `~/.cache/gitlab-notify/avatars/<user id>.<ext>` for 7 days. A failed fetch
 is remembered for an hour and falls back to the signal icon.
 
