@@ -80,17 +80,17 @@ its own notification.
 
 ## Notifiers
 
-`--notifier auto` (the default) picks, in order: on macOS the
-GitLabNotify helper app when it's been built (see below), else
+`--notifier auto` (the default) picks, in order: on macOS
+nudge when it's installed (see below), else
 `terminal-notifier` when it's on PATH, else `osascript`; `notify-send`
 elsewhere. If none is available, it prints the notifications to stdout.
 
 What works on macOS 26.6 (checked by hand):
 
-- **GitLabNotify.app** (`--notifier app`), a small signed helper in
-  `macos/`, is the one to use. Our own icon on the left, the signal icon
-  or avatar as a thumbnail on the right, in-place replacement across
-  batches, and a click opens the MR, also after the helper has exited.
+- **nudge** (`--notifier nudge`), a small signed notifier app of our own,
+  is the one to use. Its own icon on the left, the signal icon or avatar
+  as a thumbnail on the right, in-place replacement across batches, a
+  click opens the MR (also after nudge has exited), and action buttons.
 - **terminal-notifier** 2.0.0 (`brew install terminal-notifier`):
   `-group` replaces in place, `-open <url>` opens the MR on click, and
   `-contentImage <png>` shows the thumbnail. The left-hand icon is always
@@ -104,59 +104,38 @@ What works on macOS 26.6 (checked by hand):
   `-p`/`-r` to replace in place (libnotify ≥ 0.7.9), `-u critical` for
   pipeline failures and conflicts. The replace ids live in the state file.
 
-### The macOS helper app
+### nudge
+
+nudge used to live here as `macos/` (GitLabNotify.app) and is now its own
+repo: build and install it with its `build.sh`, which puts `Nudge.app` in
+`~/Applications`. The script looks for it at `$NUDGE_APP`, then
+`~/Applications/Nudge.app`, then `/Applications/Nudge.app`, and runs its
+executable once per notification:
 
 ```
-contrib/gitlab-notify/macos/build.sh
+Nudge.app/Contents/MacOS/Nudge --title T --message M --group G --thread T \
+    [--subtitle S] [--url U] [--image PNG] [--action ID=LABEL]... [--env KEY=VALUE]...
 ```
 
-builds `macos/build/GitLabNotify.app` (not committed) with the Command Line
-Tools' `swiftc`, no Xcode project: `main.swift`, `Info.plist` (`LSUIElement`,
-so no Dock icon), and an `.icns` made from `icons/app.png` with `sips` and
-`iconutil`. It signs the bundle with `$CODESIGN_IDENTITY` (default: the
-author's Apple Development certificate; `security find-identity -v -p
-codesigning` lists yours, `-` signs ad hoc) and registers it with
-LaunchServices. Until it's registered, posting fails with "Notifications
-are not allowed for this application". `$SWIFT_DEVELOPER_DIR` picks the
-toolchain (default `/Library/Developer/CommandLineTools`; a nix shell's
-`DEVELOPER_DIR` has no `swiftc`).
+The group is the notification's identity, so a later one with the same
+group replaces it (with a fresh banner). The thread is the MR (or the
+branch, for pushes and default-branch pipelines), so one MR's pipeline,
+approval and comment digest stack together in Notification Center, while
+each keeps its own group and replaces only itself. A non-zero exit is
+logged and the batch carries on.
 
-The script runs the bundle's executable once per notification:
-
-```
-GitLabNotify.app/Contents/MacOS/GitLabNotify --title T --message M \
-    [--subtitle S] [--url U] [--image PNG] [--group G] [--thread T] \
-    [--action ID=LABEL]... [--kind K] [--project P] [--iid N] \
-    [--source-branch B] [--mr-url U] [--note-url U]
-```
-
-It posts through `UNUserNotificationCenter` with the group as the request
-identifier, so a later post with the same group replaces the earlier one
-(with a fresh banner). The thread is the MR (or the branch, for pushes and
-default-branch pipelines), so one MR's pipeline, approval and comment
-digest stack together in Notification Center, while each keeps its own
-group and replaces only itself. The image goes in as an attachment, from a temp copy,
-since attaching moves the file. The url rides in `userInfo`; on a click
-macOS relaunches the app with no arguments, and it opens the url and exits.
-Exit status: 0 posted, 2 notifications not allowed, 3 failed, 64 usage;
-the script logs a non-zero exit and carries on.
-
-The `--action` and context flags are for action buttons (below). The
-script passes them only when a notification has buttons, so a helper built
-before them still posts everything else; when it rejects them (exit 64) the
-script logs "rebuild it" and posts again without buttons.
-
-The first post asks for permission (`GitLabNotify --authorize` asks without
-posting); allow it. A Focus mode holds the banners back but still
-updates Notification Center.
+`--action` and `--env` are for action buttons (below). The script passes
+them only when a notification has buttons, so a nudge built before them
+still posts everything else; when it rejects them (exit 64) the script
+logs "update it" and posts again without buttons.
 
 ### Action buttons
 
-GitLabNotify.app notifications can carry buttons that run a command of
+nudge notifications can carry buttons that run a command of
 yours with the MR's context, e.g. a "Handle Review" button on comment and
 change-request notifications. Configure them in
-`$XDG_CONFIG_HOME/gitlab-notify/actions.json` (default
-`~/.config/gitlab-notify/actions.json`):
+nudge's `$XDG_CONFIG_HOME/nudge/actions.json` (default
+`~/.config/nudge/actions.json`):
 
 ```json
 {
@@ -182,7 +161,7 @@ change-request notifications. Configure them in
 
   | variable | value |
   |---|---|
-  | `GITLAB_NOTIFY_ACTION` | the action id |
+  | `NUDGE_ACTION` | the action id (set by nudge) |
   | `GITLAB_NOTIFY_KIND` | the notification's kind |
   | `GITLAB_PROJECT` | project path, e.g. `acme/widgets` |
   | `GITLAB_MR_IID` | the MR's iid |
@@ -190,14 +169,14 @@ change-request notifications. Configure them in
   | `GITLAB_MR_URL` | the MR's web URL |
   | `GITLAB_NOTE_URL` | the comment's URL (comment notifications; in a digest, the latest comment) |
 
-On a click, macOS relaunches the helper, which reads `actions.json` again,
+On a click, macOS relaunches nudge, which reads `actions.json` again,
 looks the id up, starts the command detached and exits; the command's
-output is appended to `~/Library/Logs/gitlab-notify-actions.log`, and the
-helper's own complaints (unknown id, bad command) go to the unified log:
-`log show --last 10m --predicate 'process == "GitLabNotify"'`. The command
+output is appended to `~/Library/Logs/nudge-actions.log`, and nudge's own
+complaints (unknown id, bad command) go to the unified log:
+`log show --last 10m --predicate 'process == "Nudge"'`. The command
 only ever comes from this file at click time, never from a webhook or the
-notification, and webhook data only ever reaches it as env vars. Since the
-helper resolves the path from its own environment, which doesn't carry a
+notification, and webhook data only ever reaches it as env vars. Since
+nudge resolves the path from its own environment, which doesn't carry a
 shell's `XDG_CONFIG_HOME`, keep the file at the default path unless you set
 that variable for GUI apps too.
 
@@ -207,7 +186,7 @@ remain valid. Edits take effect on the next notification, and a click
 always runs what the file says now.
 
 With the default Banners style, buttons show on hover (several fold into
-an "Options" menu); set GitLabNotify to Alerts in System Settings >
+an "Options" menu); set Nudge to Alerts in System Settings >
 Notifications to keep them visible. Backfill summaries, terminal-notifier,
 osascript and notify-send get no buttons.
 
@@ -215,8 +194,7 @@ osascript and notify-send get no buttons.
 
 `icons/*.png` are drawn for this project by `make-icons.py` (stdlib only;
 rerun it after changing a shape or colour). There's one per signal, plus a
-summary that uses the worst signal's icon, and `app.png`, the helper app's
-icon.
+summary that uses the worst signal's icon.
 
 For comments, approvals and review requests, the actor's `avatar_url` is
 fetched (3s timeout, at most 2 MB, image content types only) and cached as

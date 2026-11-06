@@ -32,8 +32,9 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(HERE, "icons")
-# The macOS helper app, built by macos/build.sh.
-APP_BIN = os.path.join(HERE, "macos", "build", "GitLabNotify.app", "Contents", "MacOS", "GitLabNotify")
+# Where to look for Nudge.app (the nudge repo), the macOS
+# notifier: $NUDGE_APP first, then where its build.sh installs it.
+NUDGE_APPS = ("~/Applications/Nudge.app", "/Applications/Nudge.app")
 
 DAY_MS = 24 * 3600 * 1000
 SEEN_TTL_MS = 14 * DAY_MS
@@ -383,20 +384,29 @@ def run(argv, timeout=5):
         return None
 
 
-class App:
-    """GitLabNotify.app (macos/): our own icon on the left, the image as an
-    attachment, click to open."""
+def nudge_bin():
+    apps = ([os.environ["NUDGE_APP"]] if os.environ.get("NUDGE_APP") else []) + list(NUDGE_APPS)
+    for app in apps:
+        p = os.path.join(os.path.expanduser(app), "Contents", "MacOS", "Nudge")
+        if os.access(p, os.X_OK):
+            return p
+    return None
 
-    name = "app"
+
+class Nudge:
+    """Nudge.app: its own icon on the left, the image as an attachment,
+    click to open, and the action buttons."""
+
+    name = "nudge"
     replace = True  # the group is the request identifier: a repost replaces it
 
     def __init__(self, path):
         self.path = path
 
-    # Notification context -> helper flag, for the action buttons' commands.
-    CONTEXT_FLAGS = (("project", "--project"), ("iid", "--iid"),
-                     ("source_branch", "--source-branch"), ("mr_url", "--mr-url"),
-                     ("note_url", "--note-url"))
+    # Notification context -> the env var an action button's command gets it as.
+    CONTEXT_ENV = (("project", "GITLAB_PROJECT"), ("iid", "GITLAB_MR_IID"),
+                   ("source_branch", "GITLAB_SOURCE_BRANCH"), ("mr_url", "GITLAB_MR_URL"),
+                   ("note_url", "GITLAB_NOTE_URL"))
 
     def send(self, n, state):
         argv = [self.path, "--title", n["title"], "--message", n["message"],
@@ -404,25 +414,25 @@ class App:
         for k in ("subtitle", "url", "image", "thread"):
             if n.get(k):
                 argv += ["--" + k, n[k]]
-        # Button flags only when there are buttons, so a helper built before
+        # Button flags only when there are buttons, so a nudge built before
         # them still posts everything else.
         extra = []
         for a in n.get("actions") or ():
             extra += ["--action", "%s=%s" % (a["id"], a["label"])]
         if extra:
-            extra += ["--kind", n["kind"]]
+            extra += ["--env", "GITLAB_NOTIFY_KIND=" + n["kind"]]
             ctx = n.get("context") or {}
-            for k, flag in self.CONTEXT_FLAGS:
+            for k, var in self.CONTEXT_ENV:
                 if ctx.get(k) not in (None, ""):
-                    extra += [flag, str(ctx[k])]
+                    extra += ["--env", "%s=%s" % (var, ctx[k])]
         # Longer than the helper's own 8s wait on a first-run permission prompt.
         r = run(argv + extra, timeout=10)
         if r and r.returncode == 64 and extra:
-            log("GitLabNotify doesn't know action buttons (%s); rebuild it with "
-                "macos/build.sh. Posting without them." % r.stderr.strip())
+            log("nudge doesn't know action buttons (%s); update it. "
+                "Posting without them." % r.stderr.strip())
             r = run(argv, timeout=10)
         if r and r.returncode != 0:
-            log("GitLabNotify exited %d: %s" % (r.returncode, r.stderr.strip()))
+            log("nudge exited %d: %s" % (r.returncode, r.stderr.strip()))
 
 
 class TerminalNotifier:
@@ -525,9 +535,9 @@ class Collector:
 def pick_notifier(choice):
     if choice == "none":
         return None
-    if choice == "app" or (choice == "auto" and sys.platform == "darwin"
-                           and os.access(APP_BIN, os.X_OK)):
-        return App(APP_BIN)
+    nb = nudge_bin() if sys.platform == "darwin" else None
+    if choice == "nudge" or (choice == "auto" and nb):
+        return Nudge(nb or "Nudge")
     tn, ns = shutil.which("terminal-notifier"), shutil.which("notify-send")
     if choice == "terminal-notifier" or (choice == "auto" and sys.platform == "darwin" and tn):
         return TerminalNotifier(tn or "terminal-notifier")
@@ -606,8 +616,10 @@ ACTION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def actions_path():
-    """actions.json; GitLabNotify resolves the same path when a button is clicked."""
-    return os.path.join(default_dir("XDG_CONFIG_HOME", "~/.config"), "actions.json")
+    """nudge's actions.json: nudge runs a button's `command` from it when
+    clicked; the `label` and `kinds` here pick which notifications get it."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "nudge", "actions.json")
 
 
 def load_actions(path):
@@ -817,7 +829,7 @@ def main(argv=None, stdin=None, notifier=None, now_ms=None):
     p.add_argument("--phase", choices=("backfill", "live"),
                    help="override $HOOKSTR_PHASE (default live)")
     p.add_argument("--notifier", default="auto",
-                   choices=("auto", "app", "terminal-notifier", "osascript", "notify-send", "none"))
+                   choices=("auto", "nudge", "terminal-notifier", "osascript", "notify-send", "none"))
     p.add_argument("--me", help="your GitLab username: skip your own comments and approvals")
     p.add_argument("--window", default="60s",
                    help="per-MR comment digest quiet window (default 60s)")

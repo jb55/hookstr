@@ -329,8 +329,8 @@ class ThreadTests(unittest.TestCase):
 
 
 def fake_helper(d, rc=0):
-    """A stand-in for GitLabNotify that records its argv, one JSON line per run."""
-    path = os.path.join(d, "GitLabNotify")
+    """A stand-in for nudge that records its argv, one JSON line per run."""
+    path = os.path.join(d, "Nudge")
     with open(path, "w") as f:
         f.write("#!/bin/sh\n"
                 "python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\" >> %s/argv\n"
@@ -341,14 +341,14 @@ def fake_helper(d, rc=0):
 
 class AppNotifierTests(unittest.TestCase):
     def setUp(self):
-        self.saved = (gn.APP_BIN, gn.sys.platform)
+        self.saved = (gn.nudge_bin, gn.sys.platform)
 
     def tearDown(self):
-        gn.APP_BIN, gn.sys.platform = self.saved
+        gn.nudge_bin, gn.sys.platform = self.saved
 
     def test_passes_the_notification_as_flags(self):
         d = tempfile.mkdtemp()
-        app = gn.App(fake_helper(d))
+        app = gn.Nudge(fake_helper(d))
         app.send({"kind": "pipeline_failed", "group": "gitlab-notify:g", "title": "T",
                   "subtitle": "S", "message": "M", "url": "https://git.example/u",
                   "image": "/i.png", "thread": "gitlab-notify:acme/widgets!7"}, gn.empty_state())
@@ -369,8 +369,8 @@ class AppNotifierTests(unittest.TestCase):
         try:
             stdin = io.StringIO(json.dumps(pipeline_hook("failed")) + "\n")
             rc = gn.main(["--phase", "live", "--state-dir", d, "--cache-dir", d, "--no-avatars"],
-                         stdin=stdin, notifier=gn.App(fake_helper(d, rc=2)), now_ms=T0)
-            gn.App(os.path.join(d, "missing")).send(
+                         stdin=stdin, notifier=gn.Nudge(fake_helper(d, rc=2)), now_ms=T0)
+            gn.Nudge(os.path.join(d, "missing")).send(
                 {"group": "g", "title": "T", "message": "M"}, gn.empty_state())
         finally:
             gn.log = saved
@@ -378,28 +378,50 @@ class AppNotifierTests(unittest.TestCase):
         self.assertTrue(any("exited 2: boom" in m for m in logged), logged)
         self.assertTrue(any("missing failed" in m for m in logged), logged)
 
-    def test_auto_prefers_the_built_app_on_macos(self):
+    def test_auto_prefers_nudge_on_macos(self):
         d = tempfile.mkdtemp()
         gn.sys.platform = "darwin"
-        gn.APP_BIN = fake_helper(d)
+        helper = fake_helper(d)
+        gn.nudge_bin = lambda: helper
         n = gn.pick_notifier("auto")
-        self.assertIsInstance(n, gn.App)
-        self.assertEqual(n.path, gn.APP_BIN)
-        gn.APP_BIN = os.path.join(d, "not-built")
-        self.assertNotIsInstance(gn.pick_notifier("auto"), gn.App)
+        self.assertIsInstance(n, gn.Nudge)
+        self.assertEqual(n.path, helper)
+        gn.nudge_bin = lambda: None
+        self.assertNotIsInstance(gn.pick_notifier("auto"), gn.Nudge)
         gn.sys.platform = "linux"
-        gn.APP_BIN = fake_helper(d)
-        self.assertNotIsInstance(gn.pick_notifier("auto"), gn.App)
+        gn.nudge_bin = lambda: helper
+        self.assertNotIsInstance(gn.pick_notifier("auto"), gn.Nudge)
+
+    def test_finds_nudge_app_from_env_then_installed(self):
+        d = tempfile.mkdtemp()
+        app = os.path.join(d, "Nudge.app")
+        os.makedirs(os.path.join(app, "Contents", "MacOS"))
+        fake_helper(os.path.join(app, "Contents", "MacOS"))
+        saved = (os.environ.get("NUDGE_APP"), gn.NUDGE_APPS)
+        try:
+            os.environ["NUDGE_APP"] = app
+            gn.NUDGE_APPS = ()
+            self.assertEqual(gn.nudge_bin(), os.path.join(app, "Contents", "MacOS", "Nudge"))
+            os.environ["NUDGE_APP"] = os.path.join(d, "Missing.app")
+            self.assertIsNone(gn.nudge_bin())
+            gn.NUDGE_APPS = (app,)
+            self.assertEqual(gn.nudge_bin(), os.path.join(app, "Contents", "MacOS", "Nudge"))
+        finally:
+            if saved[0] is None:
+                os.environ.pop("NUDGE_APP", None)
+            else:
+                os.environ["NUDGE_APP"] = saved[0]
+            gn.NUDGE_APPS = saved[1]
 
 
 def fake_helper_without_actions(d):
-    """A GitLabNotify built before action buttons: usage error on --action."""
-    path = os.path.join(d, "OldGitLabNotify")
+    """A nudge built before action buttons: usage error on --action."""
+    path = os.path.join(d, "OldNudge")
     with open(path, "w") as f:
         f.write("#!/bin/sh\n"
                 "python3 -c 'import json,sys; print(json.dumps(sys.argv[1:]))' \"$@\" >> %s/argv\n"
                 "for a in \"$@\"; do [ \"$a\" = --action ] && "
-                "{ echo 'unknown argument --kind' >&2; exit 64; }; done\nexit 0\n" % d)
+                "{ echo 'unknown argument --action' >&2; exit 64; }; done\nexit 0\n" % d)
     os.chmod(path, 0o755)
     return path
 
@@ -426,8 +448,8 @@ class ActionTests(unittest.TestCase):
             os.environ["XDG_CONFIG_HOME"] = self.saved_env
 
     def write_conf(self, conf):
-        os.makedirs(os.path.join(self.dir, "gitlab-notify"), exist_ok=True)
-        with open(os.path.join(self.dir, "gitlab-notify", "actions.json"), "w") as f:
+        os.makedirs(os.path.join(self.dir, "nudge"), exist_ok=True)
+        with open(os.path.join(self.dir, "nudge", "actions.json"), "w") as f:
             f.write(conf if isinstance(conf, str) else json.dumps(conf))
 
     def test_matching_kinds_get_buttons_and_mr_context(self):
@@ -482,22 +504,23 @@ class ActionTests(unittest.TestCase):
             self.assertTrue(any(repr(aid) in m and "skipped" in m for m in self.logged), aid)
         self.assertTrue(any("unknown kinds nonsense" in m for m in self.logged), self.logged)
 
-    def test_app_passes_buttons_and_context_as_flags(self):
+    def test_nudge_passes_buttons_and_context_as_flags(self):
         d = tempfile.mkdtemp()
         n = {"kind": "comments", "group": "gitlab-notify:g", "title": "T", "message": "M",
              "url": "https://git.example/n", "image": None,
              "actions": [{"id": "handle-review", "label": "Handle Review"}],
              "context": {"project": "acme/widgets", "iid": 7, "source_branch": "sprockets",
                          "mr_url": "https://git.example/mr/7", "note_url": None}}
-        gn.App(fake_helper(d)).send(n, gn.empty_state())
-        gn.App(fake_helper(d)).send(dict(n, actions=[]), gn.empty_state())
+        gn.Nudge(fake_helper(d)).send(n, gn.empty_state())
+        gn.Nudge(fake_helper(d)).send(dict(n, actions=[]), gn.empty_state())
         with open(os.path.join(d, "argv")) as f:
             runs = [json.loads(line) for line in f]
         self.assertEqual(runs[0], [
             "--title", "T", "--message", "M", "--group", "gitlab-notify:g",
             "--url", "https://git.example/n", "--action", "handle-review=Handle Review",
-            "--kind", "comments", "--project", "acme/widgets", "--iid", "7",
-            "--source-branch", "sprockets", "--mr-url", "https://git.example/mr/7"])
+            "--env", "GITLAB_NOTIFY_KIND=comments", "--env", "GITLAB_PROJECT=acme/widgets",
+            "--env", "GITLAB_MR_IID=7", "--env", "GITLAB_SOURCE_BRANCH=sprockets",
+            "--env", "GITLAB_MR_URL=https://git.example/mr/7"])
         # No buttons, no button flags: an older helper still takes it.
         self.assertEqual(runs[1], ["--title", "T", "--message", "M", "--group", "gitlab-notify:g",
                                    "--url", "https://git.example/n"])
@@ -506,13 +529,13 @@ class ActionTests(unittest.TestCase):
         d = tempfile.mkdtemp()
         n = {"kind": "comments", "group": "g", "title": "T", "message": "M",
              "actions": [{"id": "a", "label": "A"}], "context": {"project": "acme/widgets"}}
-        gn.App(fake_helper_without_actions(d)).send(n, gn.empty_state())
+        gn.Nudge(fake_helper_without_actions(d)).send(n, gn.empty_state())
         with open(os.path.join(d, "argv")) as f:
             runs = [json.loads(line) for line in f]
         self.assertEqual(len(runs), 2)
         self.assertIn("--action", runs[0])
         self.assertEqual(runs[1], ["--title", "T", "--message", "M", "--group", "g"])
-        self.assertTrue(any("rebuild" in m for m in self.logged), self.logged)
+        self.assertTrue(any("update it" in m for m in self.logged), self.logged)
         self.assertFalse(any("exited" in m for m in self.logged), self.logged)
 
 
