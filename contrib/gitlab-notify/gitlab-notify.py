@@ -33,7 +33,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(HERE, "icons")
-# Where to look for Nudge.app (the nudge repo), the macOS
+# Where to look for Nudge.app (https://github.com/jb55/nudge), the macOS
 # notifier: $NUDGE_APP first, then where its build.sh installs it.
 NUDGE_APPS = ("~/Applications/Nudge.app", "/Applications/Nudge.app")
 

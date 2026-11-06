@@ -81,7 +81,7 @@ its own notification.
 ## Notifiers
 
 `--notifier auto` (the default) picks, in order: on macOS
-nudge when it's installed (see below), else
+[nudge](https://github.com/jb55/nudge) when it's installed (see below), else
 `terminal-notifier` when it's on PATH, else `osascript`; `notify-send`
 elsewhere. If none is available, it prints the notifications to stdout.
 
@@ -107,7 +107,8 @@ What works on macOS 26.6 (checked by hand):
 ### nudge
 
 nudge used to live here as `macos/` (GitLabNotify.app) and is now its own
-repo: build and install it with its `build.sh`, which puts `Nudge.app` in
+repo, [jb55/nudge](https://github.com/jb55/nudge): build and install it
+with its `build.sh`, which puts `Nudge.app` in
 `~/Applications`. The script looks for it at `$NUDGE_APP`, then
 `~/Applications/Nudge.app`, then `/Applications/Nudge.app`, and runs its
 executable once per notification:
