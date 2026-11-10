@@ -3,364 +3,747 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>hookstr — store-and-forward webhooks over nostr</title>
-<meta name="description" content="A store-and-forward webhook service backed by nostr. Providers see one endpoint that never goes down; the consumer sees every webhook, eventually, in order, with valid signatures.">
+<title>hookstr</title>
+<meta name="description" content="hookstr is a store-and-forward webhook service. Providers get an endpoint that never goes down; your laptop gets every webhook, byte-exact, whenever it comes back online.">
 <style>
-  :root {
-    --bg: #0d0f12;
-    --panel: #14171c;
-    --border: #262b33;
-    --fg: #e6e9ef;
-    --muted: #8a93a3;
-    --accent: #7c5cff;
-    --accent-dim: #3a2f6b;
-    --green: #4ade80;
-    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+:root {
+  --bg: #f6f4ef;
+  --bg-2: #eeebe3;
+  --panel: #ffffff;
+  --ink: #17161a;
+  --ink-2: #4a4852;
+  --ink-3: #7c7985;
+  --rule: #dcd8ce;
+  --accent: #6d3df5;
+  --accent-ink: #ffffff;
+  --accent-soft: #ece6ff;
+  --pending: #c77700;
+  --pending-soft: #fff1d6;
+  --ok: #1f8a4c;
+  --ok-soft: #dcf3e5;
+  --code-bg: #1b1a20;
+  --code-ink: #e9e7f0;
+  --code-dim: #8c889a;
+  --shadow: 0 1px 0 rgba(0,0,0,.04), 0 8px 24px -12px rgba(30,20,60,.18);
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111015;
+    --bg-2: #18171e;
+    --panel: #1c1b23;
+    --ink: #efedf5;
+    --ink-2: #b6b2c3;
+    --ink-3: #807c8f;
+    --rule: #2d2b37;
+    --accent: #9d7bff;
+    --accent-ink: #0f0d16;
+    --accent-soft: #2a2244;
+    --pending: #f0a63a;
+    --pending-soft: #3a2a10;
+    --ok: #4cc583;
+    --ok-soft: #13301f;
+    --code-bg: #0b0a0e;
+    --code-ink: #e9e7f0;
+    --code-dim: #7d798c;
+    --shadow: 0 1px 0 rgba(255,255,255,.03), 0 8px 24px -12px rgba(0,0,0,.6);
+    color-scheme: dark;
   }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
-  body {
-    background: var(--bg);
-    color: var(--fg);
-    font: 15px/1.65 var(--mono);
-    -webkit-font-smoothing: antialiased;
-    padding: 0 20px;
-  }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .wrap { max-width: 760px; margin: 0 auto; padding: 72px 0 96px; }
+}
+:root[data-theme="dark"] {
+  --bg: #111015; --bg-2: #18171e; --panel: #1c1b23; --ink: #efedf5; --ink-2: #b6b2c3;
+  --ink-3: #807c8f; --rule: #2d2b37; --accent: #9d7bff; --accent-ink: #0f0d16;
+  --accent-soft: #2a2244; --pending: #f0a63a; --pending-soft: #3a2a10; --ok: #4cc583;
+  --ok-soft: #13301f; --code-bg: #0b0a0e; --code-ink: #e9e7f0; --code-dim: #7d798c;
+  --shadow: 0 1px 0 rgba(255,255,255,.03), 0 8px 24px -12px rgba(0,0,0,.6);
+  color-scheme: dark;
+}
 
-  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-  h1 {
-    font-size: 34px; margin: 0; letter-spacing: -0.5px; font-weight: 700;
-  }
-  h1 .prompt { color: var(--accent); }
-  .tag {
-    font-size: 12px; color: var(--green); border: 1px solid var(--border);
-    border-radius: 999px; padding: 2px 10px; background: var(--panel);
-  }
-  .lede { color: var(--muted); font-size: 16px; margin: 20px 0 40px; }
-  .lede strong { color: var(--fg); font-weight: 600; }
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.6 var(--sans);
+  overflow-x: hidden;
+}
+a { color: var(--accent); text-underline-offset: 3px; }
+code, pre, kbd { font-family: var(--mono); }
+code { font-size: .9em; background: var(--bg-2); border: 1px solid var(--rule); padding: .05em .35em; border-radius: 5px; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+@media (min-width: 720px) { .wrap { padding: 0 32px; } }
 
-  /* ── lifetime timeline (scroll-driven) ─────────────────── */
-  .life { position: relative; margin: 0 0 8px; }
-  /* rail + fill are centered under the 36px icon column (center x = 18) */
-  .life::before {
-    content: ""; position: absolute; left: 17px; top: 18px; bottom: 18px;
-    width: 2px; background: var(--border);
-  }
-  .life .fill {
-    position: absolute; left: 17px; top: 18px; width: 2px; height: 0;
-    background: var(--accent); border-radius: 2px;
-    transition: height .15s linear;
-  }
-  .stage, .gap { position: relative; display: flex; gap: 16px; padding-bottom: 22px; }
-  .stage:last-child { padding-bottom: 0; }
-  .stage .icon, .gap .icon {
-    flex: 0 0 36px; width: 36px; height: 36px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    border: 2px solid var(--border); background: var(--bg); color: var(--muted);
-    z-index: 1; transition: border-color .3s, color .3s, box-shadow .3s;
-  }
-  .stage .icon svg, .gap .icon svg { width: 19px; height: 19px; display: block; }
-  .stage.on .icon { border-color: var(--accent); color: var(--accent); }
-  .stage.now .icon { box-shadow: 0 0 0 5px var(--accent-dim); }
-  .gap .icon { border-style: dashed; }
-  .stage .body { flex: 1 1 auto; padding-top: 2px; }
-  .stage .t {
-    font-size: 10.5px; letter-spacing: .5px; color: var(--muted);
-    font-variant-numeric: tabular-nums; text-transform: uppercase;
-  }
-  .stage .t .loc { color: var(--fg); font-weight: 600; }
-  .stage .h {
-    font-size: 15px; font-weight: 700; color: var(--muted); margin-top: 1px;
-    transition: color .3s;
-  }
-  .stage.on .h { color: var(--fg); }
-  .stage .d { font-size: 13px; color: var(--muted); margin-top: 4px; line-height: 1.55; }
-  .stage .d code { color: var(--fg); background: none; padding: 0; }
-  .stage .form {
-    display: inline-block; margin-top: 9px; font-size: 10.5px; letter-spacing: .3px;
-    padding: 3px 9px; border-radius: 6px; border: 1px solid var(--border);
-    opacity: .5; transition: opacity .3s;
-  }
-  .stage.on .form { opacity: 1; }
-  .form.http { color: #7fd1ff; border-color: #24435a; }
-  .form.nostr { color: var(--accent); border-color: var(--accent-dim); }
+/* ---------- top bar ---------- */
+.top { display: flex; align-items: center; justify-content: space-between; padding: 20px 0; gap: 16px; }
+.brand { display: flex; align-items: center; gap: 10px; font: 600 18px/1 var(--mono); color: var(--ink); text-decoration: none; letter-spacing: -.02em; }
+.brand svg { width: 26px; height: 26px; }
+.top nav { display: flex; gap: 20px; font-size: 15px; }
+.top nav a { color: var(--ink-2); text-decoration: none; }
+.top nav a:hover { color: var(--ink); }
+@media (max-width: 520px) { .top nav .opt { display: none; } }
 
-  .gap { align-items: center; }
-  .gap .g {
-    font-size: 12px; color: var(--muted); display: inline-block;
-    border: 1px dashed var(--border); border-radius: 999px; padding: 5px 13px;
-    background: var(--panel);
-  }
-  .legend { font-size: 11.5px; color: var(--muted); margin: 2px 0 40px 52px; }
-  .legend .sw { display: inline-block; margin-right: 16px; }
-  .legend .k {
-    display: inline-block; width: 9px; height: 9px; border-radius: 2px;
-    vertical-align: middle; margin-right: 6px;
-  }
-  .legend .k.http { background: #7fd1ff; }
-  .legend .k.nostr { background: var(--accent); }
+/* ---------- hero ---------- */
+.hero { padding: 48px 0 24px; }
+.eyebrow { font: 500 13px/1 var(--mono); color: var(--accent); letter-spacing: .04em; text-transform: uppercase; }
+h1 {
+  font-size: clamp(40px, 8vw, 76px);
+  line-height: 1.02;
+  letter-spacing: -.035em;
+  margin: 16px 0 20px;
+  font-weight: 700;
+  max-width: 14ch;
+}
+h1 em { font-style: normal; color: var(--accent); }
+.lede { font-size: clamp(17px, 2.2vw, 20px); color: var(--ink-2); max-width: 60ch; margin: 0 0 28px; }
+.ctas { display: flex; flex-wrap: wrap; gap: 12px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 11px 18px; border-radius: 10px; font-weight: 600; font-size: 15px;
+  text-decoration: none; border: 1px solid var(--rule); color: var(--ink); background: var(--panel);
+}
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.btn:hover { filter: brightness(1.06); }
 
-  h2 {
-    font-size: 13px; text-transform: uppercase; letter-spacing: 1.5px;
-    color: var(--muted); margin: 40px 0 18px; font-weight: 600;
-  }
+/* ---------- live demo ---------- */
+.demo {
+  margin: 40px 0 8px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 20px;
+  position: relative;
+}
+.demo-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.demo-head .label { font: 500 12px/1 var(--mono); color: var(--ink-3); text-transform: uppercase; letter-spacing: .06em; }
+.stats { display: flex; gap: 18px; font: 13px/1.2 var(--mono); color: var(--ink-2); flex-wrap: wrap; }
+.stats b { color: var(--ink); font-weight: 600; }
+.stats .zero b { color: var(--ok); }
+.stage {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  position: relative;
+}
+@media (min-width: 820px) {
+  .stage { grid-template-columns: 0.8fr 1.3fr 1.2fr; gap: 40px; align-items: stretch; }
+}
+.node {
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  padding: 14px;
+  background: var(--bg);
+  min-width: 0;
+}
+.node h3 { margin: 0 0 2px; font: 600 14px/1.3 var(--mono); }
+.node .sub { margin: 0 0 12px; font-size: 13px; color: var(--ink-3); }
+.providers { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (min-width: 820px) { .providers { flex-direction: column; } }
+.prov {
+  font: 13px/1 var(--mono);
+  padding: 9px 10px; border-radius: 8px;
+  border: 1px solid var(--rule); background: var(--panel);
+  display: flex; align-items: center; gap: 8px;
+}
+.prov i { width: 8px; height: 8px; border-radius: 50%; background: var(--prov-c); display: inline-block; flex: none; }
 
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  @media (max-width: 560px) { .grid { grid-template-columns: 1fr; } }
-  .card {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 18px 18px 16px;
-  }
-  .card h3 { margin: 0 0 6px; font-size: 14px; }
-  .card h3 code { color: var(--accent); background: none; padding: 0; }
-  .card p { margin: 0; color: var(--muted); font-size: 13.5px; line-height: 1.6; }
+.store { display: flex; flex-direction: column; }
+.store-badge { display: inline-flex; align-items: center; gap: 6px; font: 12px/1 var(--mono); color: var(--ok); }
+.store-badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.events {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px;
+  height: 230px; overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 75%, transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 75%, transparent);
+}
+.ev {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
+  font: 12px/1.2 var(--mono);
+  padding: 7px 9px; border-radius: 8px;
+  background: var(--panel); border: 1px solid var(--rule);
+  animation: drop-in .35s ease-out;
+}
+.ev i { width: 8px; height: 8px; border-radius: 50%; background: var(--prov-c); }
+.ev .p { min-width: 0; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev .s { font-size: 11px; padding: 2px 6px; border-radius: 5px; background: var(--pending-soft); color: var(--pending); }
+.ev.done .s { background: var(--ok-soft); color: var(--ok); }
+@keyframes drop-in { from { opacity: 0; transform: translateY(-6px); } }
 
-  ul.points { list-style: none; padding: 0; margin: 0; }
-  ul.points li {
-    padding: 12px 0; border-bottom: 1px solid var(--border);
-    color: var(--muted); font-size: 14px;
-  }
-  ul.points li:last-child { border-bottom: 0; }
-  ul.points li b { color: var(--fg); font-weight: 600; display: block; margin-bottom: 2px; }
+.laptop .screen {
+  background: var(--code-bg); color: var(--code-ink);
+  border-radius: 10px; padding: 10px 12px;
+  font: 12px/1.55 var(--mono);
+  height: 196px; overflow: hidden;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  transition: opacity .3s;
+}
+.laptop .screen .dim { color: var(--code-dim); }
+.laptop .screen .ok { color: #6fdc9c; }
+.laptop .screen .wa { color: #f0b660; }
+.laptop.asleep .screen { opacity: .35; }
+.laptop-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.toggle {
+  font: 600 12px/1 var(--mono);
+  border: 1px solid var(--rule); background: var(--panel); color: var(--ink);
+  padding: 7px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap;
+}
+.toggle:hover { border-color: var(--accent); }
+.toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.link-state { font: 12px/1 var(--mono); margin: 0 0 10px; color: var(--ok); }
+.laptop.asleep .link-state { color: var(--pending); }
 
-  footer {
-    margin-top: 56px; padding-top: 22px; border-top: 1px solid var(--border);
-    color: var(--muted); font-size: 13px; display: flex; gap: 20px; flex-wrap: wrap;
-  }
-  .rl { color: var(--muted); }
-  .rl code { color: var(--fg); }
+.packet {
+  position: absolute; top: 0; left: 0;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--prov-c, var(--accent));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--prov-c, var(--accent)) 25%, transparent);
+  pointer-events: none; z-index: 5;
+}
+.demo-foot { margin: 16px 0 0; font-size: 14px; color: var(--ink-3); }
+
+/* ---------- sections ---------- */
+section { padding: 72px 0 0; }
+h2 { font-size: clamp(28px, 4.4vw, 40px); letter-spacing: -.025em; line-height: 1.1; margin: 0 0 14px; }
+.kicker { font: 500 13px/1 var(--mono); color: var(--ink-3); margin: 0 0 12px; }
+.intro { color: var(--ink-2); max-width: 64ch; margin: 0 0 32px; font-size: 17px; }
+
+.problem { display: grid; gap: 16px; grid-template-columns: 1fr; }
+@media (min-width: 720px) { .problem { grid-template-columns: 1fr 1fr; } }
+.card {
+  background: var(--panel); border: 1px solid var(--rule); border-radius: 14px; padding: 20px 22px;
+}
+.card h3 { margin: 0 0 6px; font-size: 18px; letter-spacing: -.01em; }
+.card p { margin: 0; color: var(--ink-2); font-size: 15px; }
+.card.bad h3::before { content: "✕ "; color: var(--pending); }
+.card.good h3::before { content: "✓ "; color: var(--ok); }
+
+.halves { display: grid; gap: 16px; grid-template-columns: 1fr; }
+@media (min-width: 820px) { .halves { grid-template-columns: 1fr 1fr; } }
+.half { background: var(--panel); border: 1px solid var(--rule); border-radius: 16px; padding: 24px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.half .where { font: 500 12px/1 var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: .05em; }
+.half h3 { margin: 0; font: 600 22px/1.2 var(--mono); letter-spacing: -.02em; }
+.half ul { margin: 0; padding-left: 18px; color: var(--ink-2); font-size: 15px; }
+.half li { margin: 4px 0; }
+
+.flow { margin: 28px 0 0; background: var(--panel); border: 1px solid var(--rule); border-radius: 16px; padding: 20px; }
+.flow svg { width: 100%; height: auto; display: block; }
+.flow svg text { font-family: var(--mono); fill: var(--ink); }
+.flow svg .muted { fill: var(--ink-3); }
+.flow svg .box { fill: var(--bg); stroke: var(--rule); }
+.flow svg .hl { fill: var(--accent-soft); stroke: var(--accent); }
+.flow svg .line { stroke: var(--ink-3); fill: none; stroke-width: 1.5; }
+.flow svg .tunnel { stroke: var(--accent); fill: none; stroke-width: 2; stroke-dasharray: 6 5; }
+.flow svg .arrow { fill: var(--ink-3); }
+.flow svg .arrow-a { fill: var(--accent); }
+.flow .wide { display: none; }
+.flow .tall { display: block; }
+@media (min-width: 720px) { .flow .wide { display: block; } .flow .tall { display: none; } }
+
+.props { display: grid; gap: 1px; grid-template-columns: 1fr; background: var(--rule); border: 1px solid var(--rule); border-radius: 16px; overflow: hidden; }
+@media (min-width: 640px) { .props { grid-template-columns: 1fr 1fr; } }
+@media (min-width: 960px) { .props { grid-template-columns: 1fr 1fr 1fr; } }
+.prop { background: var(--panel); padding: 22px; }
+.prop .n { font: 600 12px/1 var(--mono); color: var(--accent); }
+.prop h3 { margin: 10px 0 6px; font-size: 17px; letter-spacing: -.01em; }
+.prop p { margin: 0; font-size: 15px; color: var(--ink-2); }
+
+.steps { counter-reset: s; display: grid; gap: 18px; }
+.step { display: grid; gap: 8px 20px; grid-template-columns: 1fr; }
+@media (min-width: 820px) { .step { grid-template-columns: 280px 1fr; align-items: start; } }
+.step-txt h3 { margin: 0 0 4px; font-size: 17px; display: flex; gap: 10px; align-items: baseline; }
+.step-txt h3::before { counter-increment: s; content: counter(s); font: 600 12px/1 var(--mono); color: var(--accent-ink); background: var(--accent); border-radius: 6px; padding: 4px 7px; }
+.step-txt p { margin: 0; font-size: 15px; color: var(--ink-2); }
+.step-txt .on { font: 12px/1 var(--mono); color: var(--ink-3); display: block; margin-top: 6px; }
+pre {
+  margin: 0; background: var(--code-bg); color: var(--code-ink);
+  border-radius: 12px; padding: 14px 16px; font-size: 13px; line-height: 1.6;
+  overflow-x: auto; min-width: 0;
+}
+pre .c { color: var(--code-dim); }
+pre .pr { color: #b49bff; user-select: none; }
+pre .k { color: #f0b660; }
+pre .s { color: #6fdc9c; }
+
+.modes { display: grid; gap: 16px; grid-template-columns: 1fr; }
+@media (min-width: 900px) { .modes { grid-template-columns: repeat(3, 1fr); } }
+.mode { background: var(--panel); border: 1px solid var(--rule); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.mode h3 { margin: 0; font: 600 16px/1.3 var(--mono); }
+.mode p { margin: 0; font-size: 15px; color: var(--ink-2); }
+.mode pre { font-size: 12px; margin-top: auto; }
+
+.table-wrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 14px; background: var(--panel); }
+table { border-collapse: collapse; width: 100%; font-size: 15px; min-width: 520px; }
+th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+th { font: 600 12px/1 var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--ink-3); background: var(--bg-2); }
+td:first-child { font-weight: 600; white-space: nowrap; }
+td:last-child { color: var(--ink-2); }
+
+.closing { margin: 80px 0 0; padding: 40px 24px; text-align: center; border-radius: 20px; background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+.closing h2 { margin-bottom: 10px; }
+.closing p { margin: 0 auto 22px; color: var(--ink-2); max-width: 52ch; }
+.closing .ctas { justify-content: center; }
+
+footer { padding: 48px 0 40px; color: var(--ink-3); font-size: 14px; display: flex; flex-wrap: wrap; gap: 8px 24px; justify-content: space-between; }
+footer a { color: var(--ink-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ev { animation: none; }
+}
 </style>
 </head>
 <body>
+
 <div class="wrap">
-  <header>
-    <h1><span class="prompt">$</span> hookstr</h1>
-    <span class="tag instance-only">● relay online</span>
+  <header class="top">
+    <a class="brand" href="./" aria-label="hookstr home">
+      <svg viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1" y="1" width="30" height="30" rx="8" fill="var(--accent)"/>
+        <path d="M11 8v10a5 5 0 0 0 10 0v-2" fill="none" stroke="var(--accent-ink)" stroke-width="2.6" stroke-linecap="round"/>
+        <path d="M17.5 18.5 21 15l3.5 3.5" fill="none" stroke="var(--accent-ink)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      hookstr
+    </a>
+    <nav>
+      <a class="opt" href="#how">How it works</a>
+      <a href="docs.html">Docs</a>
+      <a href="https://github.com/jb55/hookstr">GitHub</a>
+    </nav>
   </header>
 
-  <p class="lede">
-    A <strong>store-and-forward webhook service</strong> backed by
-    <a href="https://github.com/nostr-protocol/nostr">nostr</a>. Webhook providers demand an
-    always-online HTTPS endpoint and auto-disable it after repeated delivery failures. A consumer
-    behind a tunnel — sometimes offline, tunnel URL rotating — loses that race constantly.
-    hookstr splits delivery from consumption so <strong>providers see one endpoint that never goes
-    down</strong>, and the consumer sees every webhook, eventually, in order, with valid signatures.
-  </p>
+  <!-- ===== hero ===== -->
+  <div class="hero">
+    <div class="eyebrow">store-and-forward webhooks</div>
+    <h1>Webhooks that <em>wait</em> for you.</h1>
+    <p class="lede">
+      Providers want an HTTPS endpoint that never goes down. Your consumer lives on a
+      laptop behind a tunnel that sleeps, roams and rotates. hookstr sits between them:
+      it takes every delivery on always-on infra, keeps it as a signed nostr event, and
+      replays it to your machine, byte-exact, whenever you're back.
+    </p>
+    <div class="ctas">
+      <a class="btn primary" href="docs.html">Set it up →</a>
+      <a class="btn" href="https://github.com/jb55/hookstr">View source</a>
+    </div>
 
-  <h2>Lifetime of one webhook</h2>
-  <div class="life" id="life">
-    <div class="fill"></div>
-
-    <div class="stage">
-      <span class="icon"><!-- inbox / incoming -->
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="M8 9l4 4 4-4"/><path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg>
-      </span>
-      <div class="body">
-        <div class="t"><span class="loc">Provider → hookstrd</span> · T + 0 ms</div>
-        <div class="h">A webhook arrives</div>
-        <div class="d">A provider POSTs to <code>/ingest/{token}/…</code>. The reverse proxy terminates
-          TLS and hands the request to hookstrd's axum ingest.</div>
-        <span class="form http">raw HTTP · body + headers</span>
+    <!-- ===== live demo ===== -->
+    <div class="demo" id="demo" aria-label="Animated demo: webhooks arrive at hookstrd and are replayed to a laptop when it is online">
+      <div class="demo-head">
+        <span class="label">simulation</span>
+        <div class="stats" aria-live="polite">
+          <span>stored <b id="st-stored">0</b></span>
+          <span>waiting <b id="st-wait">0</b></span>
+          <span>replayed <b id="st-done">0</b></span>
+          <span class="zero">lost <b>0</b></span>
+        </div>
       </div>
-    </div>
-
-    <div class="stage">
-      <span class="icon"><!-- key / signed -->
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="4.5"/><path d="M11.2 11.2L20 20"/><path d="M17 17l2-2"/><path d="M14 14l2-2"/></svg>
-      </span>
-      <div class="body">
-        <div class="t"><span class="loc">On hookstrd</span> · T + ~1 ms</div>
-        <div class="h">hookstrd turns it into a signed event</div>
-        <div class="d">axum wraps the raw body (base64), the kept headers, and the URL path into one
-          immutable <code>kind:3003</code> nostr event, signed by the server key.</div>
-        <span class="form nostr">nostr event · kind 3003</span>
+      <div class="stage" id="stage">
+        <div class="node">
+          <h3>providers</h3>
+          <p class="sub">POST to one URL</p>
+          <div class="providers">
+            <div class="prov" id="p-gitlab" style="--prov-c:#e8663a"><i></i>gitlab</div>
+            <div class="prov" id="p-stripe" style="--prov-c:#7a73ff"><i></i>stripe</div>
+            <div class="prov" id="p-acme" style="--prov-c:#22a6a0"><i></i>acme</div>
+          </div>
+        </div>
+        <div class="node store" id="n-store">
+          <div class="laptop-head">
+            <div>
+              <h3>hookstrd</h3>
+              <p class="sub">always on · 204 in milliseconds</p>
+            </div>
+            <span class="store-badge">up</span>
+          </div>
+          <ul class="events" id="events"></ul>
+        </div>
+        <div class="node laptop" id="n-laptop">
+          <div class="laptop-head">
+            <div>
+              <h3>your laptop</h3>
+              <p class="link-state" id="link-state">● draining over tunnel</p>
+            </div>
+            <button class="toggle" id="toggle" type="button">close lid</button>
+          </div>
+          <div class="screen" id="screen" aria-hidden="true"></div>
+        </div>
       </div>
-    </div>
-
-    <div class="stage">
-      <span class="icon"><!-- database / durable -->
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>
-      </span>
-      <div class="body">
-        <div class="t"><span class="loc">On hookstrd</span> · T + ~5 ms</div>
-        <div class="h">It's saved, and the provider gets its 204</div>
-        <div class="d">The event is committed to nostrdb. An id-subscription fires on commit — and only
-          <em>then</em> does the provider get its <code>204</code>. If the write fails it gets a
-          <code>5xx</code> and retries.</div>
-        <span class="form nostr">nostr event · kind 3003</span>
-      </div>
-    </div>
-
-    <div class="gap">
-      <span class="icon"><!-- hourglass / waiting -->
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12"/><path d="M6 21h12"/><path d="M6 3c0 4 3 5 6 9 3-4 6-5 6-9"/><path d="M6 21c0-4 3-5 6-9 3 4 6 5 6 9"/></svg>
-      </span>
-      <div class="g">Your machine is offline — the event sits on hookstrd for seconds or days.
-        Nothing is ever deleted.</div>
-    </div>
-
-    <div class="stage">
-      <span class="icon"><!-- sync arrows -->
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0113-6.2L20 8"/><path d="M20 3v5h-5"/><path d="M20 12a8 8 0 01-13 6.2L4 16"/><path d="M4 21v-5h5"/></svg>
-      </span>
-      <div class="body">
-        <div class="t"><span class="loc">hookstrd → your machine</span> · minutes or days later</div>
-        <div class="h">Your drain comes back and pulls it down</div>
-        <div class="d">The drain reconnects over its tunnel and negentropy-reconciles (NIP-77)
-          every event it missed — then keeps following new ones live.</div>
-        <span class="form nostr">nostr event · over ws</span>
-      </div>
-    </div>
-
-    <div class="stage">
-      <span class="icon"><!-- shield check / verified -->
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg>
-      </span>
-      <div class="body">
-        <div class="t"><span class="loc">On your machine</span> · signature checked</div>
-        <div class="h">The signature is checked before anything replays</div>
-        <div class="d">Replay acts only on notes read back out of the drain's <em>local</em> nostrdb,
-          after its ingester has verified the signature and committed them — never on wire frames.</div>
-        <span class="form nostr">nostr event · local db</span>
-      </div>
-    </div>
-
-    <div class="stage">
-      <span class="icon"><!-- send / replay out -->
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3L10 14"/><path d="M21 3l-7 18-4-8-8-4 19-6z"/></svg>
-      </span>
-      <div class="body">
-        <div class="t"><span class="loc">Your machine → your app</span> · replay</div>
-        <div class="h">It's replayed as the original HTTP request</div>
-        <div class="d">Unwrapped back into a real HTTP POST against your local target —
-          <b>byte-exact body, preserved headers</b> — so an <code>x-signature</code> HMAC still
-          validates.</div>
-        <span class="form http">raw HTTP · body + headers</span>
-      </div>
-    </div>
-
-    <div class="stage">
-      <span class="icon"><!-- check circle / consumed -->
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-5.5"/></svg>
-      </span>
-      <div class="body">
-        <div class="t"><span class="loc">In your app</span> · done</div>
-        <div class="h">Your app handles it, exactly as if it were live</div>
-        <div class="d">Your handler dedupes on the delivery-id header and returns <code>2xx</code>.
-          Delivery is at-least-once, so a crash-mid-replay retry is always safe.</div>
-        <span class="form http">raw HTTP · body + headers</span>
-      </div>
-    </div>
-  </div>
-  <div class="legend">
-    <span class="sw"><span class="k http"></span>raw HTTP</span>
-    <span class="sw"><span class="k nostr"></span>signed nostr event</span>
-    &nbsp;— wrapped once, then unwrapped byte-for-byte.
-  </div>
-
-  <h2>Two halves</h2>
-  <div class="grid">
-    <div class="card">
-      <h3><code>hookstrd</code></h3>
-      <p>Runs permanently on always-online infra behind a TLS-terminating reverse proxy. Accepts
-      any webhook with a fast 2xx, persists it as a signed nostr event in nostrdb, and serves those
-      events back over an embedded nostr relay that listens on localhost only.</p>
-    </div>
-    <div class="card">
-      <h3><code>hookstr drain</code></h3>
-      <p>Runs wherever the consumer lives. Negentropy-syncs (NIP-77) whatever it missed while
-      offline, replays each delivery as a real HTTP request — byte-exact body, preserved headers —
-      against a local target, then keeps following in realtime.</p>
+      <p class="demo-foot">Close the lid and webhooks pile up as <em>waiting</em>. Open it and the drain catches up, oldest first, then keeps following.</p>
     </div>
   </div>
 
-  <h2>Design</h2>
-  <ul class="points">
-    <li><b>Byte-exact body preservation</b>Providers sign the raw HTTP body; bodies and signature
-      headers survive verbatim end-to-end, so consumers validate against the exact bytes.</li>
-    <li><b>At-least-once replay</b>Consumers dedupe on a delivery-id header, so conservative replay
-      (crash mid-replay, re-drain, retry) is safe.</li>
-    <li><b>Fast 2xx</b>Ingest accepts, waits for durable persistence, responds 204. 5xx only when
-      persistence itself failed, so the provider retries. Nothing downstream of the store is on the
-      ingest path.</li>
-    <li><b>Store everything</b>No deletion, ever. Negentropy reconciles over the full set, which
-      makes sync trivial.</li>
-    <li><b>Pull-only, private relay</b>The relay has no auth, so it binds to localhost or a private
-      interface, and the drain reaches it through a tunnel or VPN. Who can reach it is the access
-      control.</li>
-  </ul>
+  <!-- ===== problem ===== -->
+  <section>
+    <p class="kicker">// the problem</p>
+    <h2>Providers don't wait. Laptops don't stay up.</h2>
+    <p class="intro">
+      GitHub, GitLab, Stripe and friends deliver to an endpoint, retry for a while, then
+      give up, and many will switch the hook off after enough failures. Pointing them
+      at a dev tunnel means losing that race whenever the lid closes or the URL changes.
+    </p>
+    <div class="problem">
+      <div class="card bad">
+        <h3>Point the provider at your tunnel</h3>
+        <p>Missed deliveries while offline, a disabled hook after a long weekend, and a new URL to paste into every provider when the tunnel rotates.</p>
+      </div>
+      <div class="card good">
+        <h3>Point the provider at hookstr</h3>
+        <p>One stable URL that answers in milliseconds. Every delivery is stored durably, then synced to your machine and replayed when it's reachable.</p>
+      </div>
+    </div>
+  </section>
 
-  <p class="rl instance-only" style="margin-top:32px">
-    This is a hookstr ingest endpoint. Providers POST to <code>/ingest/{token}/…</code>; the drain
-    syncs from this host's relay over a tunnel.
-  </p>
+  <!-- ===== how ===== -->
+  <section id="how">
+    <p class="kicker">// how it works</p>
+    <h2>Two halves, joined by nostr.</h2>
+    <p class="intro">
+      hookstr splits accepting a webhook from consuming it. The server never talks to your
+      consumer, and the consumer never has to be reachable from the internet.
+    </p>
+    <div class="halves">
+      <div class="half">
+        <span class="where">on the always-on box</span>
+        <h3>hookstrd</h3>
+        <ul>
+          <li>Takes <code>POST /ingest/&lt;token&gt;/any/path</code> behind your TLS proxy.</li>
+          <li>Persists each delivery as a signed kind <code>3003</code> event in nostrdb, then answers 204.</li>
+          <li>Serves the store over an embedded nostr relay bound to localhost or a private interface.</li>
+          <li>One token per provider, so each can be rotated on its own.</li>
+        </ul>
+      </div>
+      <div class="half">
+        <span class="where">wherever the consumer runs</span>
+        <h3>hookstr drain</h3>
+        <ul>
+          <li>Reaches the relay through ssh, Tailscale or WireGuard.</li>
+          <li>Negentropy-syncs (NIP-77) everything it missed while offline.</li>
+          <li>Replays each one as a real HTTP request, with the original body bytes and headers.</li>
+          <li>Then follows live, and reconnects and re-syncs on its own.</li>
+        </ul>
+      </div>
+    </div>
 
-  <p class="rl" style="margin-top:32px">
-    Ready to run it? The <a href="docs.html">setup &amp; usage docs</a> cover standing up
-    <code>hookstrd</code> behind a proxy and driving the <code>hookstr</code> drain CLI in detail.
-  </p>
+    <div class="flow" role="img" aria-label="Providers POST over TLS to a reverse proxy, which forwards to hookstrd ingest, which writes to nostrdb. The hookstrd relay on localhost serves nostrdb. A tunnel connects the relay to hookstr drain on the dev machine, which replays requests to the local consumer.">
+      <svg class="wide" viewBox="0 0 960 250" aria-hidden="true">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrow"/></marker>
+          <marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrow-a"/></marker>
+        </defs>
+        <!-- providers -->
+        <rect class="box" x="10" y="40" width="120" height="36" rx="8"/><text x="70" y="63" text-anchor="middle" font-size="13">provider A</text>
+        <rect class="box" x="10" y="92" width="120" height="36" rx="8"/><text x="70" y="115" text-anchor="middle" font-size="13">provider B</text>
+        <path class="line" d="M130 58 C160 58 160 84 188 84" marker-end="url(#ah)"/>
+        <path class="line" d="M130 110 C160 110 160 84 188 84" marker-end="url(#ah)"/>
+        <text x="158" y="34" text-anchor="middle" font-size="11" class="muted">HTTPS POST</text>
+        <!-- server zone -->
+        <rect x="190" y="14" width="400" height="224" rx="14" fill="none" stroke="var(--rule)" stroke-dasharray="4 4"/>
+        <text x="206" y="36" font-size="11" class="muted">always-on server</text>
+        <rect class="box" x="206" y="64" width="110" height="40" rx="8"/><text x="261" y="89" text-anchor="middle" font-size="13">TLS proxy</text>
+        <path class="line" d="M316 84 H354" marker-end="url(#ah)"/>
+        <rect class="hl" x="356" y="64" width="110" height="40" rx="8"/><text x="411" y="82" text-anchor="middle" font-size="13">hookstrd</text><text x="411" y="97" text-anchor="middle" font-size="10" class="muted">ingest</text>
+        <path class="line" d="M466 84 H504 V118" marker-end="url(#ah)"/>
+        <rect class="box" x="476" y="120" width="96" height="40" rx="8"/><text x="524" y="145" text-anchor="middle" font-size="13">nostrdb</text>
+        <path class="line" d="M524 160 V184 H468" marker-end="url(#ah)"/>
+        <rect class="hl" x="356" y="166" width="110" height="40" rx="8"/><text x="411" y="184" text-anchor="middle" font-size="13">relay</text><text x="411" y="199" text-anchor="middle" font-size="10" class="muted">127.0.0.1:8081</text>
+        <!-- tunnel -->
+        <path class="tunnel" d="M356 186 C300 186 300 226 360 230 L640 230 C690 230 690 186 676 186" marker-end="url(#aa)"/>
+        <text x="520" y="222" text-anchor="middle" font-size="11" fill="var(--accent)">tunnel · NIP-77 sync + live REQ</text>
+        <!-- client zone -->
+        <rect x="610" y="14" width="340" height="190" rx="14" fill="none" stroke="var(--rule)" stroke-dasharray="4 4"/>
+        <text x="626" y="36" font-size="11" class="muted">dev machine</text>
+        <rect class="hl" x="678" y="166" width="140" height="34" rx="8"/><text x="748" y="188" text-anchor="middle" font-size="13">hookstr drain</text>
+        <path class="line" d="M748 166 V110" marker-end="url(#ah)"/>
+        <text x="756" y="142" font-size="11" class="muted">replay, byte-exact</text>
+        <rect class="box" x="664" y="64" width="268" height="44" rx="8"/><text x="798" y="84" text-anchor="middle" font-size="13">your consumer</text><text x="798" y="99" text-anchor="middle" font-size="10" class="muted">localhost:3000/webhooks · or --exec ./script</text>
+      </svg>
+      <svg class="tall" viewBox="0 0 320 560" aria-hidden="true">
+        <defs>
+          <marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrow"/></marker>
+          <marker id="aa2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="arrow-a"/></marker>
+        </defs>
+        <rect class="box" x="60" y="6" width="200" height="34" rx="8"/><text x="160" y="28" text-anchor="middle" font-size="13">providers</text>
+        <path class="line" d="M160 40 V78" marker-end="url(#ah2)"/><text x="170" y="64" font-size="11" class="muted">HTTPS POST</text>
+        <rect x="10" y="80" width="300" height="250" rx="14" fill="none" stroke="var(--rule)" stroke-dasharray="4 4"/>
+        <text x="24" y="100" font-size="11" class="muted">always-on server</text>
+        <rect class="box" x="60" y="110" width="200" height="34" rx="8"/><text x="160" y="132" text-anchor="middle" font-size="13">TLS proxy</text>
+        <path class="line" d="M160 144 V164" marker-end="url(#ah2)"/>
+        <rect class="hl" x="60" y="166" width="200" height="34" rx="8"/><text x="160" y="188" text-anchor="middle" font-size="13">hookstrd ingest</text>
+        <path class="line" d="M160 200 V220" marker-end="url(#ah2)"/>
+        <rect class="box" x="60" y="222" width="200" height="34" rx="8"/><text x="160" y="244" text-anchor="middle" font-size="13">nostrdb</text>
+        <path class="line" d="M160 256 V276" marker-end="url(#ah2)"/>
+        <rect class="hl" x="60" y="278" width="200" height="34" rx="8"/><text x="160" y="300" text-anchor="middle" font-size="13">relay · localhost</text>
+        <path class="tunnel" d="M160 312 V398" marker-end="url(#aa2)"/>
+        <text x="170" y="350" font-size="11" fill="var(--accent)">tunnel</text>
+        <text x="170" y="366" font-size="11" fill="var(--accent)">NIP-77 + live REQ</text>
+        <rect x="10" y="384" width="300" height="168" rx="14" fill="none" stroke="var(--rule)" stroke-dasharray="4 4"/>
+        <text x="24" y="404" font-size="11" class="muted">dev machine</text>
+        <rect class="hl" x="60" y="410" width="200" height="34" rx="8"/><text x="160" y="432" text-anchor="middle" font-size="13">hookstr drain</text>
+        <path class="line" d="M160 444 V484" marker-end="url(#ah2)"/><text x="170" y="468" font-size="11" class="muted">replay, byte-exact</text>
+        <rect class="box" x="60" y="486" width="200" height="40" rx="8"/><text x="160" y="511" text-anchor="middle" font-size="13">your consumer</text>
+      </svg>
+    </div>
+  </section>
+
+  <!-- ===== properties ===== -->
+  <section>
+    <p class="kicker">// guarantees</p>
+    <h2>Built so your consumer can't tell the difference.</h2>
+    <p class="intro">A replayed webhook looks like the original: same body bytes, same signature headers, same delivery id.</p>
+    <div class="props">
+      <div class="prop"><span class="n">01</span><h3>Byte-exact bodies</h3><p>Providers HMAC the raw body. hookstr keeps it verbatim, binary included, so your existing signature check passes on replay.</p></div>
+      <div class="prop"><span class="n">02</span><h3>Headers preserved</h3><p>Signature and delivery-id headers make the trip. Hop-by-hop and proxy headers are dropped.</p></div>
+      <div class="prop"><span class="n">03</span><h3>At-least-once</h3><p>A crash mid-replay means a retry, never a gap. Dedupe on the provider's delivery id, which you should be doing anyway.</p></div>
+      <div class="prop"><span class="n">04</span><h3>Fast 2xx</h3><p>Ingest waits only for the durable write, then answers 204. A 5xx means the write itself failed, so the provider retries.</p></div>
+      <div class="prop"><span class="n">05</span><h3>Store everything</h3><p>Nothing is ever deleted. A webhook is a few KB, so a million deliveries fit in single-digit GB, and sync stays simple.</p></div>
+      <div class="prop"><span class="n">06</span><h3>Private by address</h3><p>The relay binds to localhost or a VPN interface. Only your tunnel reaches it, and the drain replays only events it has verified.</p></div>
+    </div>
+  </section>
+
+  <!-- ===== quickstart ===== -->
+  <section>
+    <p class="kicker">// quickstart</p>
+    <h2>Up in four steps.</h2>
+    <p class="intro">The <a href="docs.html">docs</a> cover every option. This is the short path.</p>
+    <div class="steps">
+      <div class="step">
+        <div class="step-txt"><h3>Make a server key</h3><p>hookstrd signs every stored webhook with it.</p><span class="on">on the server</span></div>
+<pre><span class="pr">$ </span>hookstr keygen
+<span class="c">nsec:   nsec1...
+pubkey: 8f2a...</span></pre>
+      </div>
+      <div class="step">
+        <div class="step-txt"><h3>Run hookstrd</h3><p>Proxy only the ingest port. Keep the relay on localhost.</p><span class="on">on the server</span></div>
+<pre><span class="c"># hookstrd.toml</span>
+<span class="k">db_path</span>     = <span class="s">"/var/lib/hookstr/ndb"</span>
+<span class="k">ingest_addr</span> = <span class="s">"127.0.0.1:8080"</span>   <span class="c"># behind your TLS proxy</span>
+<span class="k">relay_addr</span>  = <span class="s">"127.0.0.1:8081"</span>   <span class="c"># never proxied</span>
+<span class="k">nsec_path</span>   = <span class="s">"/var/lib/hookstr/server.nsec"</span>
+
+[ingest_tokens]
+<span class="k">gitlab</span> = <span class="s">"long-random-secret"</span>
+
+<span class="pr">$ </span>hookstrd --config hookstrd.toml</pre>
+      </div>
+      <div class="step">
+        <div class="step-txt"><h3>Register the URL</h3><p>Give each provider its token. Whatever follows the token becomes the replay path.</p><span class="on">in the provider's settings</span></div>
+<pre>https://hooks.example.com/ingest/<span class="k">long-random-secret</span>/<span class="s">gitlab/events</span></pre>
+      </div>
+      <div class="step">
+        <div class="step-txt"><h3>Tunnel in and drain</h3><p>Catches up on the backlog, then follows live.</p><span class="on">on your laptop</span></div>
+<pre><span class="pr">$ </span>ssh -NL 8081:127.0.0.1:8081 hooks.example.com
+<span class="pr">$ </span>hookstr init ws://127.0.0.1:8081
+<span class="pr">$ </span>hookstr drain --target http://localhost:3000/webhooks gitlab
+<span class="c">→ POST /webhooks/gitlab/events  204</span></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== modes ===== -->
+  <section>
+    <p class="kicker">// consuming</p>
+    <h2>Replay to a server, a script, or your terminal.</h2>
+    <p class="intro">Each drain names the providers it handles, so one hookstrd can feed several consumers, each with its own scoped drain.</p>
+    <div class="modes">
+      <div class="mode">
+        <h3>drain --target</h3>
+        <p>Replays each webhook as a real HTTP request to your local app. Retries with backoff while the app is down.</p>
+<pre><span class="pr">$ </span>hookstr drain \
+    --target http://localhost:3000 stripe</pre>
+      </div>
+      <div class="mode">
+        <h3>drain --exec</h3>
+        <p>No server needed. Batches of NDJSON go to a command on stdin, and exit 0 acks the batch. <code>HOOKSTR_PHASE</code> says whether it's <code>backfill</code> or <code>live</code>.</p>
+<pre><span class="pr">$ </span>hookstr drain --exec ./notify.py gitlab</pre>
+      </div>
+      <div class="mode">
+        <h3>peek</h3>
+        <p>Prints stored webhooks without delivering anything or touching replay state. <code>--exec</code> runs a consumer the same way, with acks kept in memory.</p>
+<pre><span class="pr">$ </span>hookstr peek --follow gitlab</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== failures ===== -->
+  <section>
+    <p class="kicker">// when things break</p>
+    <h2>Every failure has a boring answer.</h2>
+    <p class="intro">The only failure a provider can ever see is the ingest box itself being down, and then it retries as usual.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>failure</th><th>what happens</th></tr></thead>
+        <tbody>
+          <tr><td>laptop asleep</td><td>Webhooks wait in the store. The drain syncs them on reconnect and replays oldest first.</td></tr>
+          <tr><td>consumer down</td><td>Retry with backoff. The events are already durable.</td></tr>
+          <tr><td>crash mid-replay</td><td>At-least-once delivery plus consumer dedupe makes it safe.</td></tr>
+          <tr><td>duplicate deliveries</td><td>Stored as distinct events. The consumer dedupes on the delivery id.</td></tr>
+          <tr><td>storage write fails</td><td>Ingest returns 500 and the provider retries.</td></tr>
+          <tr><td>ingest URL leaks</td><td>Rotate that provider's token. The others are untouched.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="closing">
+    <h2>Stop babysitting your tunnel.</h2>
+    <p>Run hookstrd once on a box that stays up, and let your laptop come and go.</p>
+    <div class="ctas">
+      <a class="btn primary" href="docs.html">Read the docs →</a>
+      <a class="btn" href="https://github.com/jb55/hookstr">github.com/jb55/hookstr</a>
+    </div>
+  </div>
 
   <footer>
-    <a href="docs.html">setup docs</a>
-    <a href="https://github.com/jb55/hookstr">source on github ↗</a>
-    <a href="https://github.com/nostr-protocol/nostr">nostr protocol</a>
-    <a href="https://github.com/nostr-protocol/nips/blob/master/77.md">NIP-77 sync</a>
+    <span>hookstr · built on <a href="https://github.com/damus-io/nostrdb">nostrdb</a> and <a href="https://github.com/nostr-protocol/nips/blob/master/77.md">NIP-77</a> negentropy sync</span>
+    <span><a href="docs.html">docs</a> · <a href="https://github.com/jb55/hookstr">source</a></span>
   </footer>
 </div>
 
 <script>
-(function () {
-  var life = document.getElementById('life');
-  if (!life) return;
-  var fill = life.querySelector('.fill');
-  var steps = Array.prototype.slice.call(life.querySelectorAll('.stage, .gap'));
-  if (!steps.length) return;
+(() => {
+  const stage = document.getElementById('stage');
+  const demo = document.getElementById('demo');
+  const list = document.getElementById('events');
+  const screen = document.getElementById('screen');
+  const laptop = document.getElementById('n-laptop');
+  const store = document.getElementById('n-store');
+  const toggle = document.getElementById('toggle');
+  const linkState = document.getElementById('link-state');
+  const stStored = document.getElementById('st-stored');
+  const stWait = document.getElementById('st-wait');
+  const stDone = document.getElementById('st-done');
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  // The rail/fill start at 18px from the top of .life (icon center).
-  var RAIL_TOP = 18;
+  const providers = [
+    { name: 'gitlab', el: document.getElementById('p-gitlab'), c: '#e8663a',
+      paths: ['gitlab/events · Push Hook', 'gitlab/events · Pipeline Hook', 'gitlab/events · Note Hook', 'gitlab/events · Merge Request Hook'] },
+    { name: 'stripe', el: document.getElementById('p-stripe'), c: '#7a73ff',
+      paths: ['stripe/hooks · invoice.paid', 'stripe/hooks · charge.succeeded', 'stripe/hooks · customer.updated'] },
+    { name: 'acme', el: document.getElementById('p-acme'), c: '#22a6a0',
+      paths: ['acme/events · order.created', 'acme/events · order.shipped'] },
+  ];
 
-  function centerOf(step) {
-    var icon = step.querySelector('.icon');
-    var lr = life.getBoundingClientRect(), ir = icon.getBoundingClientRect();
-    return ir.top - lr.top + ir.height / 2; // icon center, in .life coords
+  let online = true;
+  let userTouched = false;
+  let stored = 0, done = 0;
+  const pending = [];   // event objects waiting for replay, oldest first
+  let draining = false;
+
+  const hex = () => Array.from({length: 4}, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join('');
+
+  function center(el) {
+    const a = el.getBoundingClientRect(), b = demo.getBoundingClientRect();
+    return { x: a.left - b.left + a.width / 2, y: a.top - b.top + a.height / 2 };
   }
 
-  function update() {
-    // Progress point = where a line ~55% down the viewport crosses the rail.
-    var lr = life.getBoundingClientRect();
-    var refInLife = window.innerHeight * 0.55 - lr.top; // in .life coords
-    var last = centerOf(steps[steps.length - 1]);
-    var y = Math.max(RAIL_TOP, Math.min(refInLife, last));
-    fill.style.height = (y - RAIL_TOP) + 'px';
-
-    var activeIdx = -1;
-    steps.forEach(function (s, k) {
-      var on = centerOf(s) <= y + 0.5;
-      s.classList.toggle('on', on);
-      if (on) activeIdx = k;
-    });
-    steps.forEach(function (s, k) { s.classList.toggle('now', k === activeIdx); });
+  function fly(fromEl, toEl, color, ms) {
+    if (reduce || document.hidden) return Promise.resolve();
+    const p = document.createElement('div');
+    p.className = 'packet';
+    p.style.setProperty('--prov-c', color);
+    demo.appendChild(p);
+    const a = center(fromEl), b = center(toEl);
+    const anim = p.animate([
+      { transform: `translate(${a.x - 5}px, ${a.y - 5}px) scale(.6)`, opacity: 0 },
+      { transform: `translate(${a.x - 5}px, ${a.y - 5}px) scale(1)`, opacity: 1, offset: .1 },
+      { transform: `translate(${b.x - 5}px, ${b.y - 5}px) scale(1)`, opacity: 1, offset: .9 },
+      { transform: `translate(${b.x - 5}px, ${b.y - 5}px) scale(.4)`, opacity: 0 },
+    ], { duration: ms, easing: 'cubic-bezier(.45,.05,.35,1)' });
+    // Never let a stalled animation (throttled tab, odd engine) wedge the queue.
+    const cap = new Promise(r => setTimeout(r, ms + 250));
+    return Promise.race([anim.finished.catch(() => {}), cap]).then(() => p.remove());
   }
 
-  // Reduced motion: light the whole path, skip the scroll binding.
-  if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    steps.forEach(function (s) { s.classList.add('on'); });
-    fill.style.height = (centerOf(steps[steps.length - 1]) - RAIL_TOP) + 'px';
-    return;
+  function stats() {
+    stStored.textContent = stored;
+    stWait.textContent = pending.length;
+    stDone.textContent = done;
   }
 
-  var ticking = false;
-  function onScroll() {
-    if (ticking) return;
-    ticking = true;
-    requestAnimationFrame(function () { update(); ticking = false; });
+  function log(html) {
+    const line = document.createElement('div');
+    line.innerHTML = html;
+    screen.appendChild(line);
+    while (screen.children.length > 11) screen.removeChild(screen.firstChild);
   }
-  window.addEventListener('scroll', onScroll, { passive: true });
-  window.addEventListener('resize', onScroll, { passive: true });
-  update();
+
+  async function ingest() {
+    const prov = providers[Math.floor(Math.random() * providers.length)];
+    const path = prov.paths[Math.floor(Math.random() * prov.paths.length)];
+    await fly(prov.el, store, prov.c, 800);
+    const li = document.createElement('li');
+    li.className = 'ev';
+    li.style.setProperty('--prov-c', prov.c);
+    li.innerHTML = `<i></i><span class="p">${path}</span><span class="s">waiting</span>`;
+    list.prepend(li);
+    while (list.children.length > 14) list.removeChild(list.lastChild);
+    stored++;
+    const ev = { prov, path, li, id: hex() };
+    pending.push(ev);
+    stats();
+    drain();
+  }
+
+  async function drain() {
+    if (draining || !online) return;
+    draining = true;
+    const backlog = pending.length > 1;
+    if (backlog) log(`<span class="dim">sync: ${pending.length} missed, replaying oldest first</span>`);
+    while (online && pending.length) {
+      const ev = pending[0];
+      await fly(ev.li.isConnected ? ev.li : store, laptop, ev.prov.c, backlog ? 500 : 700);
+      if (!online) break;
+      pending.shift();
+      ev.li.classList.add('done');
+      ev.li.querySelector('.s').textContent = 'replayed';
+      done++;
+      stats();
+      const route = ev.path.split(' · ')[0];
+      log(`<span class="ok">POST</span> /webhooks/${route} <span class="ok">204</span> <span class="dim">${ev.id}</span>`);
+    }
+    draining = false;
+    if (online && pending.length) drain();
+  }
+
+  function setOnline(v) {
+    online = v;
+    laptop.classList.toggle('asleep', !online);
+    toggle.textContent = online ? 'close lid' : 'open lid';
+    linkState.textContent = online ? '● draining over tunnel' : '○ offline · tunnel down';
+    if (online) {
+      log('<span class="dim">tunnel up · negentropy sync…</span>');
+      drain();
+    } else {
+      log('<span class="wa">lid closed · tunnel dropped</span>');
+    }
+  }
+
+  toggle.addEventListener('click', () => { userTouched = true; setOnline(!online); });
+
+  log('<span class="dim">$ hookstr drain --target http://localhost:3000/webhooks gitlab stripe acme</span>');
+  log('<span class="dim">following ws://127.0.0.1:8081</span>');
+
+  // Webhooks arrive on an irregular cadence.
+  (function tick() {
+    if (!document.hidden) ingest();
+    setTimeout(tick, 900 + Math.random() * 1400);
+  })();
+
+  // Until someone clicks, the laptop naps on its own so the backlog story plays out.
+  (function nap() {
+    if (userTouched) return;
+    setTimeout(() => {
+      if (userTouched) return;
+      setOnline(false);
+      setTimeout(() => { if (!userTouched) { setOnline(true); nap(); } }, 7000);
+    }, 9000);
+  })();
+
+  stats();
 })();
 </script>
 </body>
